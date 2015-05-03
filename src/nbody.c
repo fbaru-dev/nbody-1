@@ -16,9 +16,9 @@
 // Choose precision
 #define DOUBLEPREC 1
 	typedef double real_t;
-//	#define VECWIDTH 1
-	#define AVX 1
-		#define VECWIDTH 4
+	#define VECWIDTH 1
+//	#define AVX 1
+//		#define VECWIDTH 4
 //	#define SSE 1
 //		#define VECWIDTH 2
 
@@ -101,7 +101,7 @@ int main(void)
 	for (int nBodies = 100; nBodies < 300; nBodies += 20) {
 		RunSimulation(nTimeSteps, nBodies);
 	}
-	for (int nBodies = 300; nBodies <= 1000; nBodies += 100) {
+	for (int nBodies = 300; nBodies <= 500; nBodies += 100) {
 		RunSimulation(nTimeSteps, nBodies);
 	}
 
@@ -161,7 +161,7 @@ void RunSimulation(const int nTimeSteps, const int nBodies)
 	}
 	timeElapsed = GetWallTime() - timeElapsed;
 //	printf("nBodies: %4d, MegaUpdates/second: %lf. Error: %le\n", nBodies, nTimeSteps*nBodies/timeElapsed/1000000.0, ErrorCheck(nBodies, rx));
-	printf("%4d %le %le\n", nBodies, nTimeSteps/timeElapsed/1000000.0, ErrorCheck(nBodies, rx));
+	printf("%4d %le %le\n", nBodies, nTimeSteps/timeElapsed/1000.0, ErrorCheck(nBodies, rx));
 
 
 
@@ -215,13 +215,12 @@ void ComputeAccel(
 	real_t * restrict ay,
 	const real_t * restrict mass)
 {
-	double distx, disty, sqrtRecipDist;
 
 	for (int i = 0; i < nBodies; i++) {
 		for (int j = i+1; j < nBodies; j++) {
-			distx = rx[i] - rx[j];
-			disty = ry[i] - ry[j];
-			sqrtRecipDist = 1.0/sqrt(distx*distx+disty*disty);
+			real_t distx = rx[i] - rx[j];
+			real_t disty = ry[i] - ry[j];
+			real_t sqrtRecipDist = 1.0/sqrt(distx*distx+disty*disty);
 			ax[i] += (mass[j] * distx * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
 			ay[i] += (mass[j] * disty * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
 			ax[j] -= (mass[i] * distx * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
