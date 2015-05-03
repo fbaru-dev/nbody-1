@@ -8,8 +8,6 @@
 
 // Algorithm parameters
 #define G 0.1
-#define NBODIES 1000
-#define NTIMESTEPS 5000
 #define STEPSIZE 0.0001
 #define FORCELIMIT 0.0001
 
@@ -18,14 +16,29 @@
 // Choose precision
 #define DOUBLEPREC 1
 	typedef double real_t;
+//	#define VECWIDTH 1
+	#define AVX 1
+		#define VECWIDTH 4
+//	#define SSE 1
+//		#define VECWIDTH 2
+
+
 //#define SINGLEPREC 1
 //	typedef float real_t;
+//	#define AVX 1
+//		#define VECWIDTH 8
+//	#define SSE 1
+//		#define VECWIDTH 4
+//#define VECWIDTH 1
 
 
 // Function prototypes
+void RunSimulation(const int ntimeSteps, const int nBodies);
+
 void TimeStep(
 	FILE * plotfile,
 	const int timeStep,
+	const int nBodies,
 	real_t * restrict rx,
 	real_t * restrict ry,
 	real_t * restrict vx,
@@ -35,12 +48,15 @@ void TimeStep(
 	const real_t * restrict mass);
 
 void ComputeAccel(
+	const int nBodies,
 	const real_t * restrict rx,
 	const real_t * restrict ry,
 	real_t * restrict ax,
 	real_t * restrict ay,
 	const real_t * restrict mass);
-void ComputeAccelAVX(
+
+void ComputeAccelVec(
+	const int nBodies,
 	const real_t * restrict rx,
 	const real_t * restrict ry,
 	real_t * restrict ax,
@@ -48,6 +64,7 @@ void ComputeAccelAVX(
 	const real_t * restrict mass);
 
 void UpdatePositions(
+	const int nBodies,
 	real_t * restrict rx,
 	real_t * restrict ry,
 	real_t * restrict vx,
@@ -56,6 +73,7 @@ void UpdatePositions(
 	real_t * restrict ay);
 
 void SetInitialConditions(
+	const int nBodies,
 	real_t * restrict rx,
 	real_t * restrict ry,
 	real_t * restrict vx,
@@ -64,10 +82,8 @@ void SetInitialConditions(
 	real_t * restrict ay,
 	real_t * restrict mass);
 
-void PrintPositions(FILE * plotfile, const real_t * restrict rx, const real_t * restrict ry);
-
-double ErrorCheck(const real_t * restrict rx);
-
+void PrintPositions(FILE * plotfile, const int nBodies, const real_t * restrict rx, const real_t * restrict ry);
+double ErrorCheck(const int nBodies, const real_t * restrict rx);
 
 // Utility functions
 double GetWallTime(void);
@@ -77,10 +93,30 @@ double GetWallTime(void);
 
 int main(void)
 {
+	const int nTimeSteps = 20000;
+
+	for (int nBodies = 10; nBodies < 100; nBodies += 10) {
+		RunSimulation(nTimeSteps, nBodies);
+	}
+	for (int nBodies = 100; nBodies < 300; nBodies += 20) {
+		RunSimulation(nTimeSteps, nBodies);
+	}
+	for (int nBodies = 300; nBodies <= 1000; nBodies += 100) {
+		RunSimulation(nTimeSteps, nBodies);
+	}
+
+	return 0;
+}
+
+
+void RunSimulation(const int nTimeSteps, const int nBodies)
+{
 	double timeElapsed;
 
 	// files for printing
-	FILE * datfile = fopen("plots/pos.dat","w");
+	char filename[25];
+	sprintf(filename, "plots/pos%d.dat", nBodies);
+	FILE * datfile = fopen(filename,"w");
 	FILE * plotfile = fopen("plots/plot.plt","w");
 
 	// Allocate arrays
@@ -91,15 +127,15 @@ int main(void)
 	real_t * ax;
 	real_t * ay;
 	real_t * mass;
-	rx = _mm_malloc(NBODIES * sizeof *rx,32);
-	ry = _mm_malloc(NBODIES * sizeof *ry,32);
-	vx = _mm_malloc(NBODIES * sizeof *vx,32);
-	vy = _mm_malloc(NBODIES * sizeof *vy,32);
-	ax = _mm_malloc(NBODIES * sizeof *ax,32);
-	ay = _mm_malloc(NBODIES * sizeof *ay,32);
-	mass = _mm_malloc(NBODIES * sizeof *mass,32);
+	rx =   _mm_malloc(nBodies * sizeof *rx,32);
+	ry =   _mm_malloc(nBodies * sizeof *ry,32);
+	vx =   _mm_malloc(nBodies * sizeof *vx,32);
+	vy =   _mm_malloc(nBodies * sizeof *vy,32);
+	ax =   _mm_malloc(nBodies * sizeof *ax,32);
+	ay =   _mm_malloc(nBodies * sizeof *ay,32);
+	mass = _mm_malloc(nBodies * sizeof *mass,32);
 
-	SetInitialConditions(rx,ry, vx,vy, ax,ay, mass);
+	SetInitialConditions(nBodies, rx,ry, vx,vy, ax,ay, mass);
 
 
 
@@ -111,20 +147,21 @@ int main(void)
 	fprintf(plotfile, "set xrange [-100:100]\n");
 	fprintf(plotfile, "set yrange [-100:100]\n");
 	fprintf(plotfile, "plot \\\n");
-	for (int i = 0; i < NBODIES-1; i++) {
+	for (int i = 0; i < nBodies-1; i++) {
 		fprintf(plotfile, "\"pos.dat\" using %d:%d with linespoints,\\\n", 2*i+1, 2*i+2);
 	}
-	fprintf(plotfile, "\"pos.dat\" using %d:%d with linespoints\n", 2*(NBODIES-1)+1, 2*(NBODIES-1)+2);
+	fprintf(plotfile, "\"pos.dat\" using %d:%d with linespoints\n", 2*(nBodies-1)+1, 2*(nBodies-1)+2);
 #endif
 
 
 
 	timeElapsed = GetWallTime();
-	for (int n = 0; n < NTIMESTEPS; n++) {
-		TimeStep(datfile, n, rx,ry, vx,vy, ax,ay, mass);
+	for (int n = 0; n < nTimeSteps; n++) {
+		TimeStep(datfile, n, nBodies, rx,ry, vx,vy, ax,ay, mass);
 	}
 	timeElapsed = GetWallTime() - timeElapsed;
-	printf("MegaUpdates/second: %lf. Error: %le\n", NTIMESTEPS*NBODIES/timeElapsed/1000000.0, ErrorCheck(rx));
+//	printf("nBodies: %4d, MegaUpdates/second: %lf. Error: %le\n", nBodies, nTimeSteps*nBodies/timeElapsed/1000000.0, ErrorCheck(nBodies, rx));
+	printf("%4d %le %le\n", nBodies, nTimeSteps/timeElapsed/1000000.0, ErrorCheck(nBodies, rx));
 
 
 
@@ -137,14 +174,15 @@ int main(void)
 	_mm_free(mass);
 	fclose(plotfile);
 	fclose(datfile);
-	return 0;
-}
 
+
+}
 
 
 void TimeStep(
 	FILE * plotfile,
 	const int timeStep,
+	const int nBodies,
 	real_t * restrict rx,
 	real_t * restrict ry,
 	real_t * restrict vx,
@@ -153,17 +191,24 @@ void TimeStep(
 	real_t * restrict ay,
 	const real_t * restrict mass)
 {
-	ComputeAccelAVX(rx,ry, ax,ay, mass);
-	UpdatePositions(rx,ry, vx,vy, ax,ay);
+#if defined(AVX) || defined(SSE)
+	ComputeAccelVec(nBodies, rx,ry, ax,ay, mass);
+#else
+	ComputeAccel(nBodies, rx,ry, ax,ay, mass);
+#endif
+
+	UpdatePositions(nBodies, rx,ry, vx,vy, ax,ay);
+
 #ifdef PRINTPOS
 	if (timeStep % 1000 == 0) {
-		PrintPositions(plotfile, rx,ry);
+		PrintPositions(plotfile, nBodies, rx,ry);
 	}
 #endif
 }
 
 
 void ComputeAccel(
+	const int nBodies,
 	const real_t * restrict rx,
 	const real_t * restrict ry,
 	real_t * restrict ax,
@@ -172,8 +217,8 @@ void ComputeAccel(
 {
 	double distx, disty, sqrtRecipDist;
 
-	for (int i = 0; i < NBODIES; i++) {
-		for (int j = i+1; j < NBODIES; j++) {
+	for (int i = 0; i < nBodies; i++) {
+		for (int j = i+1; j < nBodies; j++) {
 			distx = rx[i] - rx[j];
 			disty = ry[i] - ry[j];
 			sqrtRecipDist = 1.0/sqrt(distx*distx+disty*disty);
@@ -194,7 +239,8 @@ void ComputeAccel(
 }
 
 
-void ComputeAccelAVX(
+void ComputeAccelVec(
+	const int nBodies,
 	const real_t * restrict rx,
 	const real_t * restrict ry,
 	real_t * restrict ax,
@@ -203,14 +249,14 @@ void ComputeAccelAVX(
 {
 	double distx, disty, sqrtRecipDist;
 
-	// limit of vectorized loop is the multiple of for including or below NBODIES
-	// May have to "clean up" a few bodies at the end
-	const int jVecMax = 4*(NBODIES/4);
+	// limit of vectorized loop is the multiple of VECWIDTH <= NBODIES
+	// (May have to "clean up" a few bodies at the end)
+	const int jVecMax = VECWIDTH*(nBodies/VECWIDTH);
 
-	for (int i = 0; i < NBODIES; i++) {
+	for (int i = 0; i < nBodies; i++) {
 
 		// Vectorized j loop starts at multiple of 4 >= i+1
-		const int jVecMin = (4*((i)/4)+4) > NBODIES ? NBODIES : (4*((i)/4)+4);
+		const int jVecMin = (VECWIDTH*((i)/VECWIDTH)+VECWIDTH) > nBodies ? nBodies : (VECWIDTH*((i)/VECWIDTH)+VECWIDTH);
 
 		// first initial non-vectorized part
 		for (int j = i+1; j < jVecMin; j++) {
@@ -227,14 +273,15 @@ void ComputeAccelAVX(
 		if (jVecMax < jVecMin) break;
 
 
-		// main vectorized part
+		// main vectorized part. Here we have code for both AVX and SSE
+#ifdef AVX
 		__m256d rxiVec = _mm256_set1_pd(rx[i]);
 		__m256d ryiVec = _mm256_set1_pd(ry[i]);
 		__m256d massiVec = _mm256_set1_pd(mass[i]);
 		__m256d axiUpdVec = _mm256_set1_pd(0.0);
 		__m256d ayiUpdVec = _mm256_set1_pd(0.0);
 
-		for (int j = jVecMin; j < jVecMax; j+=4) {
+		for (int j = jVecMin; j < jVecMax; j+=VECWIDTH) {
 			__m256d rxjVec = _mm256_load_pd(&rx[j]);
 			__m256d ryjVec = _mm256_load_pd(&ry[j]);
 			__m256d axjVec = _mm256_load_pd(&ax[j]);
@@ -247,27 +294,18 @@ void ComputeAccelAVX(
 			__m256d sqrtRecipDistVec = _mm256_div_pd(_mm256_set1_pd(1.0),
 			                                         _mm256_sqrt_pd(_mm256_add_pd(_mm256_mul_pd(distxVec,distxVec),
 			                                                                      _mm256_mul_pd(distyVec,distyVec))));
+			// cube:
+			sqrtRecipDistVec = _mm256_mul_pd(sqrtRecipDistVec,_mm256_mul_pd(sqrtRecipDistVec,sqrtRecipDistVec));
 
-			axiUpdVec = _mm256_add_pd(axiUpdVec,_mm256_mul_pd(massjVec,
-			                                                  _mm256_mul_pd(distxVec,
-			                                                                _mm256_mul_pd(sqrtRecipDistVec,
-			                                                                              _mm256_mul_pd(sqrtRecipDistVec,
-			                                                                                            sqrtRecipDistVec)))));
-			ayiUpdVec = _mm256_add_pd(ayiUpdVec,_mm256_mul_pd(massjVec,
-			                                                  _mm256_mul_pd(distyVec,
-			                                                                _mm256_mul_pd(sqrtRecipDistVec,
-			                                                                              _mm256_mul_pd(sqrtRecipDistVec,
-			                                                                                            sqrtRecipDistVec)))));
-			axjVec = _mm256_sub_pd(axjVec,_mm256_mul_pd(massiVec,
-			                                                  _mm256_mul_pd(distxVec,
-			                                                                _mm256_mul_pd(sqrtRecipDistVec,
-			                                                                              _mm256_mul_pd(sqrtRecipDistVec,
-			                                                                                            sqrtRecipDistVec)))));
-			ayjVec = _mm256_sub_pd(ayjVec,_mm256_mul_pd(massiVec,
-			                                                  _mm256_mul_pd(distyVec,
-			                                                                _mm256_mul_pd(sqrtRecipDistVec,
-			                                                                              _mm256_mul_pd(sqrtRecipDistVec,
-			                                                                                            sqrtRecipDistVec)))));
+			// multiply into distxVec and distyVec
+			distxVec = _mm256_mul_pd(distxVec,sqrtRecipDistVec);
+			distyVec = _mm256_mul_pd(distyVec,sqrtRecipDistVec);
+
+			// update accelerations
+			axiUpdVec = _mm256_add_pd(axiUpdVec,_mm256_mul_pd(massjVec,distxVec));
+			ayiUpdVec = _mm256_add_pd(ayiUpdVec,_mm256_mul_pd(massjVec,distyVec));
+			axjVec = _mm256_sub_pd(axjVec,_mm256_mul_pd(massiVec,distxVec));
+			ayjVec = _mm256_sub_pd(ayjVec,_mm256_mul_pd(massiVec,distyVec));
 
 			_mm256_store_pd(&ax[j],axjVec);
 			_mm256_store_pd(&ay[j],ayjVec);
@@ -278,10 +316,56 @@ void ComputeAccelAVX(
 		ayiUpdVec = _mm256_hadd_pd(ayiUpdVec,ayiUpdVec);
 		ax[i] += ((double*)&axiUpdVec)[0] + ((double*)&axiUpdVec)[2];
 		ay[i] += ((double*)&ayiUpdVec)[0] + ((double*)&ayiUpdVec)[2];
+#endif
+
+#ifdef SSE
+		__m128d rxiVec = _mm_set1_pd(rx[i]);
+		__m128d ryiVec = _mm_set1_pd(ry[i]);
+		__m128d massiVec = _mm_set1_pd(mass[i]);
+		__m128d axiUpdVec = _mm_set1_pd(0.0);
+		__m128d ayiUpdVec = _mm_set1_pd(0.0);
+
+		for (int j = jVecMin; j < jVecMax; j+=VECWIDTH) {
+			__m128d rxjVec = _mm_load_pd(&rx[j]);
+			__m128d ryjVec = _mm_load_pd(&ry[j]);
+			__m128d axjVec = _mm_load_pd(&ax[j]);
+			__m128d ayjVec = _mm_load_pd(&ay[j]);
+			__m128d massjVec = _mm_load_pd(&mass[j]);
+
+			__m128d distxVec = _mm_sub_pd(rxiVec, rxjVec);
+			__m128d distyVec = _mm_sub_pd(ryiVec, ryjVec);
+
+			__m128d sqrtRecipDistVec = _mm_div_pd(_mm_set1_pd(1.0),
+			                                         _mm_sqrt_pd(_mm_add_pd(_mm_mul_pd(distxVec,distxVec),
+			                                                                      _mm_mul_pd(distyVec,distyVec))));
+			// cube:
+			sqrtRecipDistVec = _mm_mul_pd(sqrtRecipDistVec,_mm_mul_pd(sqrtRecipDistVec,sqrtRecipDistVec));
+
+			// multiply into distxVec and distyVec
+			distxVec = _mm_mul_pd(distxVec,sqrtRecipDistVec);
+			distyVec = _mm_mul_pd(distyVec,sqrtRecipDistVec);
+
+			// update accelerations
+			axiUpdVec = _mm_add_pd(axiUpdVec,_mm_mul_pd(massjVec,distxVec));
+			ayiUpdVec = _mm_add_pd(ayiUpdVec,_mm_mul_pd(massjVec,distyVec));
+			axjVec = _mm_sub_pd(axjVec,_mm_mul_pd(massiVec,distxVec));
+			ayjVec = _mm_sub_pd(ayjVec,_mm_mul_pd(massiVec,distyVec));
+
+
+			_mm_store_pd(&ax[j],axjVec);
+			_mm_store_pd(&ay[j],ayjVec);
+		}
+
+		// Now need to sum elements of axiUpdVec,ayiUpdVec and add to ax[i],ay[i]
+		axiUpdVec = _mm_hadd_pd(axiUpdVec,axiUpdVec);
+		ayiUpdVec = _mm_hadd_pd(ayiUpdVec,ayiUpdVec);
+		ax[i] += ((double*)&axiUpdVec)[0];
+		ay[i] += ((double*)&ayiUpdVec)[0];
+#endif
 
 
 		// final non-vectorized part, iff we didn't already run up to a jVecMin which is larger than jVecMax
-		for (int j = jVecMax; j < NBODIES; j++) {
+		for (int j = jVecMax; j < nBodies; j++) {
 			distx = rx[i] - rx[j];
 			disty = ry[i] - ry[j];
 			sqrtRecipDist = 1.0/sqrt(distx*distx+disty*disty);
@@ -295,6 +379,7 @@ void ComputeAccelAVX(
 }
 
 void UpdatePositions(
+	const int nBodies,
 	real_t * restrict rx,
 	real_t * restrict ry,
 	real_t * restrict vx,
@@ -302,7 +387,7 @@ void UpdatePositions(
 	real_t * restrict ax,
 	real_t * restrict ay)
 {
-	for (int i = 0; i < NBODIES; i++) {
+	for (int i = 0; i < nBodies; i++) {
 			//new force values in .ax, .ay
 			//update pos and vel
 			vx[i] += (-G)*STEPSIZE * ax[i];
@@ -318,6 +403,7 @@ void UpdatePositions(
 
 
 void SetInitialConditions(
+	const int nBodies,
 	real_t * restrict rx,
 	real_t * restrict ry,
 	real_t * restrict vx,
@@ -327,7 +413,7 @@ void SetInitialConditions(
 	real_t * restrict mass)
 {
 	// Set random initial conditions.
-	for (int i = 0; i < NBODIES; i++) {
+	for (int i = 0; i < nBodies; i++) {
 		rx[i] = ((double)rand()*(double)100/(double)RAND_MAX)*pow(-1,rand()%2);
 		ry[i] = ((double)rand()*(double)100/(double)RAND_MAX)*pow(-1,rand()%2);
 		vx[i] = (rand()%3)*pow(-1,rand()%2);
@@ -338,23 +424,23 @@ void SetInitialConditions(
 	}
 }
 
-double ErrorCheck(const real_t * restrict rx)
+double ErrorCheck(const int nBodies, const real_t * restrict rx)
 {
 	// Compute sum of x coordinates. Can use to check consistency between versions.
 	double sumx = 0;
-	for (int i = 0; i < NBODIES; i++) {
+	for (int i = 0; i < nBodies; i++) {
 		sumx += rx[i];
 	}
 	return sumx;
 }
 
 
-void PrintPositions(FILE * file, const real_t * restrict rx, const real_t * restrict ry)
+void PrintPositions(FILE * file, const int nBodies, const real_t * restrict rx, const real_t * restrict ry)
 {
-	for(int i = 0; i < NBODIES-1; i++) {
+	for(int i = 0; i < nBodies-1; i++) {
 		fprintf(file, "%le %le ", rx[i],ry[i]);
 	}
-	fprintf(file, "%le %le\n",rx[NBODIES-1],ry[NBODIES-1]);
+	fprintf(file, "%le %le\n",rx[nBodies-1],ry[nBodies-1]);
 }
 
 
