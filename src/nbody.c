@@ -2,7 +2,9 @@
 #include <stdlib.h>
 #include <time.h>
 #include <math.h>
+#include <string.h>
 #include <immintrin.h>
+#include <omp.h>
 
 
 
@@ -101,7 +103,7 @@ int main(void)
 	for (int nBodies = 100; nBodies < 300; nBodies += 20) {
 		RunSimulation(nTimeSteps, nBodies);
 	}
-	for (int nBodies = 300; nBodies <= 500; nBodies += 100) {
+	for (int nBodies = 300; nBodies <= 1000; nBodies += 100) {
 		RunSimulation(nTimeSteps, nBodies);
 	}
 
@@ -112,6 +114,8 @@ int main(void)
 void RunSimulation(const int nTimeSteps, const int nBodies)
 {
 	double timeElapsed;
+
+	int threadCount = omp_get_max_threads();
 
 	// files for printing
 	char filename[25];
@@ -131,8 +135,8 @@ void RunSimulation(const int nTimeSteps, const int nBodies)
 	ry =   _mm_malloc(nBodies * sizeof *ry,32);
 	vx =   _mm_malloc(nBodies * sizeof *vx,32);
 	vy =   _mm_malloc(nBodies * sizeof *vy,32);
-	ax =   _mm_malloc(nBodies * sizeof *ax,32);
-	ay =   _mm_malloc(nBodies * sizeof *ay,32);
+	ax =   _mm_malloc(nBodies * threadCount * sizeof *ax,32);
+	ay =   _mm_malloc(nBodies * threadCount * sizeof *ay,32);
 	mass = _mm_malloc(nBodies * sizeof *mass,32);
 
 	SetInitialConditions(nBodies, rx,ry, vx,vy, ax,ay, mass);
@@ -215,16 +219,20 @@ void ComputeAccel(
 	real_t * restrict ay,
 	const real_t * restrict mass)
 {
-
+	// This time, the ax and ay arrays are omp_get_num_threads() times bigger than nBodies. Each thread writes
+	// acceleration values to its own area, and we reduce to the first nBodies entires at the end.
+	int threadCount = omp_get_max_threads();
+	#pragma omp parallel for default(none) shared(ax,ay,rx,ry,mass) schedule(static,32)
 	for (int i = 0; i < nBodies; i++) {
+		int tid = omp_get_thread_num();
 		for (int j = i+1; j < nBodies; j++) {
 			real_t distx = rx[i] - rx[j];
 			real_t disty = ry[i] - ry[j];
 			real_t sqrtRecipDist = 1.0/sqrt(distx*distx+disty*disty);
-			ax[i] += (mass[j] * distx * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
-			ay[i] += (mass[j] * disty * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
-			ax[j] -= (mass[i] * distx * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
-			ay[j] -= (mass[i] * disty * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
+			ax[tid*nBodies+i] += (mass[j] * distx * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
+			ay[tid*nBodies+i] += (mass[j] * disty * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
+			ax[tid*nBodies+j] -= (mass[i] * distx * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
+			ay[tid*nBodies+j] -= (mass[i] * disty * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
 
 			// This version with a force-limiting term stops nearby bodies experiencing arbitrarily high
 			// forces. Important for numerical stability, but not for performance testing.
@@ -232,6 +240,13 @@ void ComputeAccel(
 //			ay[i] += (mass[j] * disty * pow(sqrtRecipDist*sqrtRecipDist+FORCELIMIT,3.0/2.0));
 //			ax[j] -= (mass[i] * distx * pow(sqrtRecipDist*sqrtRecipDist+FORCELIMIT,3.0/2.0));
 //			ay[j] -= (mass[i] * disty * pow(sqrtRecipDist*sqrtRecipDist+FORCELIMIT,3.0/2.0));
+		}
+	}
+	#pragma omp parallel for default(none), shared(ax,ay) firstprivate(threadCount)
+	for (int i = 0; i < nBodies; i++) {
+		for (int j = 1; j < threadCount; j++) {
+			ax[i] += ax[j*nBodies + i];
+			ay[i] += ay[j*nBodies + i];
 		}
 	}
 
@@ -417,10 +432,10 @@ void SetInitialConditions(
 		ry[i] = ((double)rand()*(double)100/(double)RAND_MAX)*pow(-1,rand()%2);
 		vx[i] = (rand()%3)*pow(-1,rand()%2);
 		vy[i] = (rand()%3)*pow(-1,rand()%2);
-		ax[i] = 0;
-		ay[i] = 0;
 		mass[i] = 1000;
 	}
+	memset(ax, 0.0, nBodies*omp_get_max_threads() * sizeof *ax);
+	memset(ay, 0.0, nBodies*omp_get_max_threads() * sizeof *ay);
 }
 
 double ErrorCheck(const int nBodies, const real_t * restrict rx)
