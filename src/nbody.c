@@ -18,9 +18,9 @@
 // Choose precision
 #define DOUBLEPREC 1
 	typedef double real_t;
-	#define VECWIDTH 1
-//	#define AVX 1
-//		#define VECWIDTH 4
+//	#define VECWIDTH 1
+	#define AVX 1
+		#define VECWIDTH 4
 //	#define SSE 1
 //		#define VECWIDTH 2
 
@@ -41,6 +41,7 @@ void TimeStep(
 	FILE * plotfile,
 	const int timeStep,
 	const int nBodies,
+	const int nBodiesPadded,
 	real_t * restrict rx,
 	real_t * restrict ry,
 	real_t * restrict vx,
@@ -51,6 +52,7 @@ void TimeStep(
 
 void ComputeAccel(
 	const int nBodies,
+	const int nBodiesPadded,
 	const real_t * restrict rx,
 	const real_t * restrict ry,
 	real_t * restrict ax,
@@ -59,6 +61,7 @@ void ComputeAccel(
 
 void ComputeAccelVec(
 	const int nBodies,
+	const int nBodiesPadded,
 	const real_t * restrict rx,
 	const real_t * restrict ry,
 	real_t * restrict ax,
@@ -67,6 +70,7 @@ void ComputeAccelVec(
 
 void UpdatePositions(
 	const int nBodies,
+	const int nBodiesPadded,
 	real_t * restrict rx,
 	real_t * restrict ry,
 	real_t * restrict vx,
@@ -76,6 +80,7 @@ void UpdatePositions(
 
 void SetInitialConditions(
 	const int nBodies,
+	const int nBodiesPadded,
 	real_t * restrict rx,
 	real_t * restrict ry,
 	real_t * restrict vx,
@@ -135,11 +140,16 @@ void RunSimulation(const int nTimeSteps, const int nBodies)
 	ry =   _mm_malloc(nBodies * sizeof *ry,32);
 	vx =   _mm_malloc(nBodies * sizeof *vx,32);
 	vy =   _mm_malloc(nBodies * sizeof *vy,32);
-	ax =   _mm_malloc(nBodies * threadCount * sizeof *ax,32);
-	ay =   _mm_malloc(nBodies * threadCount * sizeof *ay,32);
 	mass = _mm_malloc(nBodies * sizeof *mass,32);
 
-	SetInitialConditions(nBodies, rx,ry, vx,vy, ax,ay, mass);
+	// In parallel, each thread needs its own acceleration array, so that it can update the totals in it. If nBodies is
+	// not a multiple of 4, threads with id > 0 will not be accessing 32byte aligned values when they load 4 doubles into
+	// an __m256d, so we need to pad the array to the multiple of 4 above nBodies.
+	const int nBodiesPadded = 4*((nBodies-1)/4)+4;
+	ax =   _mm_malloc(nBodiesPadded * threadCount * sizeof *ax,32);
+	ay =   _mm_malloc(nBodiesPadded * threadCount * sizeof *ay,32);
+
+	SetInitialConditions(nBodies, nBodiesPadded, rx,ry, vx,vy, ax,ay, mass);
 
 
 
@@ -161,7 +171,7 @@ void RunSimulation(const int nTimeSteps, const int nBodies)
 
 	timeElapsed = GetWallTime();
 	for (int n = 0; n < nTimeSteps; n++) {
-		TimeStep(datfile, n, nBodies, rx,ry, vx,vy, ax,ay, mass);
+		TimeStep(datfile, n, nBodies, nBodiesPadded, rx,ry, vx,vy, ax,ay, mass);
 	}
 	timeElapsed = GetWallTime() - timeElapsed;
 //	printf("nBodies: %4d, MegaUpdates/second: %lf. Error: %le\n", nBodies, nTimeSteps*nBodies/timeElapsed/1000000.0, ErrorCheck(nBodies, rx));
@@ -187,6 +197,7 @@ void TimeStep(
 	FILE * plotfile,
 	const int timeStep,
 	const int nBodies,
+	const int nBodiesPadded,
 	real_t * restrict rx,
 	real_t * restrict ry,
 	real_t * restrict vx,
@@ -196,12 +207,12 @@ void TimeStep(
 	const real_t * restrict mass)
 {
 #if defined(AVX) || defined(SSE)
-	ComputeAccelVec(nBodies, rx,ry, ax,ay, mass);
+	ComputeAccelVec(nBodies, nBodiesPadded, rx,ry, ax,ay, mass);
 #else
-	ComputeAccel(nBodies, rx,ry, ax,ay, mass);
+	ComputeAccel(nBodies, nBodiesPadded, rx,ry, ax,ay, mass);
 #endif
 
-	UpdatePositions(nBodies, rx,ry, vx,vy, ax,ay);
+	UpdatePositions(nBodies, nBodiesPadded, rx,ry, vx,vy, ax,ay);
 
 #ifdef PRINTPOS
 	if (timeStep % 1000 == 0) {
@@ -213,6 +224,7 @@ void TimeStep(
 
 void ComputeAccel(
 	const int nBodies,
+	const int nBodiesPadded,
 	const real_t * restrict rx,
 	const real_t * restrict ry,
 	real_t * restrict ax,
@@ -222,17 +234,17 @@ void ComputeAccel(
 	// This time, the ax and ay arrays are omp_get_num_threads() times bigger than nBodies. Each thread writes
 	// acceleration values to its own area, and we reduce to the first nBodies entires at the end.
 	int threadCount = omp_get_max_threads();
-	#pragma omp parallel for default(none) shared(ax,ay,rx,ry,mass) schedule(static,32)
+	#pragma omp parallel for default(none) shared(ax,ay,rx,ry,mass) schedule(static,8)
 	for (int i = 0; i < nBodies; i++) {
 		int tid = omp_get_thread_num();
 		for (int j = i+1; j < nBodies; j++) {
 			real_t distx = rx[i] - rx[j];
 			real_t disty = ry[i] - ry[j];
 			real_t sqrtRecipDist = 1.0/sqrt(distx*distx+disty*disty);
-			ax[tid*nBodies+i] += (mass[j] * distx * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
-			ay[tid*nBodies+i] += (mass[j] * disty * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
-			ax[tid*nBodies+j] -= (mass[i] * distx * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
-			ay[tid*nBodies+j] -= (mass[i] * disty * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
+			ax[tid*nBodiesPadded+i] += (mass[j] * distx * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
+			ay[tid*nBodiesPadded+i] += (mass[j] * disty * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
+			ax[tid*nBodiesPadded+j] -= (mass[i] * distx * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
+			ay[tid*nBodiesPadded+j] -= (mass[i] * disty * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
 
 			// This version with a force-limiting term stops nearby bodies experiencing arbitrarily high
 			// forces. Important for numerical stability, but not for performance testing.
@@ -242,11 +254,11 @@ void ComputeAccel(
 //			ay[j] -= (mass[i] * disty * pow(sqrtRecipDist*sqrtRecipDist+FORCELIMIT,3.0/2.0));
 		}
 	}
-	#pragma omp parallel for default(none), shared(ax,ay) firstprivate(threadCount)
+	#pragma omp parallel for default(none), shared(ax,ay) firstprivate(threadCount) schedule(static,8)
 	for (int i = 0; i < nBodies; i++) {
 		for (int j = 1; j < threadCount; j++) {
-			ax[i] += ax[j*nBodies + i];
-			ay[i] += ay[j*nBodies + i];
+			ax[i] += ax[j*nBodiesPadded + i];
+			ay[i] += ay[j*nBodiesPadded + i];
 		}
 	}
 
@@ -255,138 +267,155 @@ void ComputeAccel(
 
 void ComputeAccelVec(
 	const int nBodies,
+	const int nBodiesPadded,
 	const real_t * restrict rx,
 	const real_t * restrict ry,
 	real_t * restrict ax,
 	real_t * restrict ay,
 	const real_t * restrict mass)
 {
-	double distx, disty, sqrtRecipDist;
+	// This time, the ax and ay arrays are omp_get_num_threads() times bigger than nBodies. Each thread writes
+	// acceleration values to its own area, and we reduce to the first nBodies entires at the end.
+	int threadCount = omp_get_max_threads();
 
 	// limit of vectorized loop is the multiple of VECWIDTH <= NBODIES
 	// (May have to "clean up" a few bodies at the end)
 	const int jVecMax = VECWIDTH*(nBodies/VECWIDTH);
 
+	#pragma omp parallel for default(none) shared(ax,ay,rx,ry,mass) schedule(static,8)
 	for (int i = 0; i < nBodies; i++) {
-
-		// Vectorized j loop starts at multiple of 4 >= i+1
+		// this must be INSIDE the parallel region
+		int tid = omp_get_thread_num();
+	
+		// Vectorized j loop starts at multiple of 4 >= i+1, of if this is greater than nBodies, we set to nBodies and
+		// stop computing after the initial loop
 		const int jVecMin = (VECWIDTH*((i)/VECWIDTH)+VECWIDTH) > nBodies ? nBodies : (VECWIDTH*((i)/VECWIDTH)+VECWIDTH);
 
 		// first initial non-vectorized part
 		for (int j = i+1; j < jVecMin; j++) {
-			distx = rx[i] - rx[j];
-			disty = ry[i] - ry[j];
-			sqrtRecipDist = 1.0/sqrt(distx*distx+disty*disty);
-			ax[i] += (mass[j] * distx * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
-			ay[i] += (mass[j] * disty * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
-			ax[j] -= (mass[i] * distx * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
-			ay[j] -= (mass[i] * disty * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
+			real_t distx = rx[i] - rx[j];
+			real_t disty = ry[i] - ry[j];
+			real_t sqrtRecipDist = 1.0/sqrt(distx*distx+disty*disty);
+			ax[tid*nBodiesPadded + i] += (mass[j] * distx * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
+			ay[tid*nBodiesPadded + i] += (mass[j] * disty * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
+			ax[tid*nBodiesPadded + j] -= (mass[i] * distx * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
+			ay[tid*nBodiesPadded + j] -= (mass[i] * disty * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
 		}
 
-		// if we have already finished, break out of the loop early
-		if (jVecMax < jVecMin) break;
+		// Continue iff jVecMin <= jVecMax: otherwise we have already finished. This happens when we are right at the
+		// end of the i loop
+		if (jVecMin <= jVecMax) {
 
-
-		// main vectorized part. Here we have code for both AVX and SSE
+			// main vectorized part. Here we have code for both AVX and SSE
 #ifdef AVX
-		__m256d rxiVec = _mm256_set1_pd(rx[i]);
-		__m256d ryiVec = _mm256_set1_pd(ry[i]);
-		__m256d massiVec = _mm256_set1_pd(mass[i]);
-		__m256d axiUpdVec = _mm256_set1_pd(0.0);
-		__m256d ayiUpdVec = _mm256_set1_pd(0.0);
+			__m256d rxiVec = _mm256_set1_pd(rx[i]);
+			__m256d ryiVec = _mm256_set1_pd(ry[i]);
+			__m256d massiVec = _mm256_set1_pd(mass[i]);
+			__m256d axiUpdVec = _mm256_set1_pd(0.0);
+			__m256d ayiUpdVec = _mm256_set1_pd(0.0);
 
-		for (int j = jVecMin; j < jVecMax; j+=VECWIDTH) {
-			__m256d rxjVec = _mm256_load_pd(&rx[j]);
-			__m256d ryjVec = _mm256_load_pd(&ry[j]);
-			__m256d axjVec = _mm256_load_pd(&ax[j]);
-			__m256d ayjVec = _mm256_load_pd(&ay[j]);
-			__m256d massjVec = _mm256_load_pd(&mass[j]);
+			for (int j = jVecMin; j < jVecMax; j+=VECWIDTH) {
+				__m256d rxjVec = _mm256_load_pd(&rx[j]);
+				__m256d ryjVec = _mm256_load_pd(&ry[j]);
+				__m256d axjVec = _mm256_load_pd(&ax[tid*nBodiesPadded + j]);
+				__m256d ayjVec = _mm256_load_pd(&ay[tid*nBodiesPadded + j]);
+				__m256d massjVec = _mm256_load_pd(&mass[j]);
 
-			__m256d distxVec = _mm256_sub_pd(rxiVec, rxjVec);
-			__m256d distyVec = _mm256_sub_pd(ryiVec, ryjVec);
+				__m256d distxVec = _mm256_sub_pd(rxiVec, rxjVec);
+				__m256d distyVec = _mm256_sub_pd(ryiVec, ryjVec);
 
-			__m256d sqrtRecipDistVec = _mm256_div_pd(_mm256_set1_pd(1.0),
-			                                         _mm256_sqrt_pd(_mm256_add_pd(_mm256_mul_pd(distxVec,distxVec),
-			                                                                      _mm256_mul_pd(distyVec,distyVec))));
-			// cube:
-			sqrtRecipDistVec = _mm256_mul_pd(sqrtRecipDistVec,_mm256_mul_pd(sqrtRecipDistVec,sqrtRecipDistVec));
+				__m256d sqrtRecipDistVec = _mm256_div_pd(_mm256_set1_pd(1.0),
+																	  _mm256_sqrt_pd(_mm256_add_pd(_mm256_mul_pd(distxVec,distxVec),
+																											 _mm256_mul_pd(distyVec,distyVec))));
+				// cube:
+				sqrtRecipDistVec = _mm256_mul_pd(sqrtRecipDistVec,_mm256_mul_pd(sqrtRecipDistVec,sqrtRecipDistVec));
 
-			// multiply into distxVec and distyVec
-			distxVec = _mm256_mul_pd(distxVec,sqrtRecipDistVec);
-			distyVec = _mm256_mul_pd(distyVec,sqrtRecipDistVec);
+				// multiply into distxVec and distyVec
+				distxVec = _mm256_mul_pd(distxVec,sqrtRecipDistVec);
+				distyVec = _mm256_mul_pd(distyVec,sqrtRecipDistVec);
 
-			// update accelerations
-			axiUpdVec = _mm256_add_pd(axiUpdVec,_mm256_mul_pd(massjVec,distxVec));
-			ayiUpdVec = _mm256_add_pd(ayiUpdVec,_mm256_mul_pd(massjVec,distyVec));
-			axjVec = _mm256_sub_pd(axjVec,_mm256_mul_pd(massiVec,distxVec));
-			ayjVec = _mm256_sub_pd(ayjVec,_mm256_mul_pd(massiVec,distyVec));
+				// update accelerations
+				axiUpdVec = _mm256_add_pd(axiUpdVec,_mm256_mul_pd(massjVec,distxVec));
+				ayiUpdVec = _mm256_add_pd(ayiUpdVec,_mm256_mul_pd(massjVec,distyVec));
+				axjVec = _mm256_sub_pd(axjVec,_mm256_mul_pd(massiVec,distxVec));
+				ayjVec = _mm256_sub_pd(ayjVec,_mm256_mul_pd(massiVec,distyVec));
 
-			_mm256_store_pd(&ax[j],axjVec);
-			_mm256_store_pd(&ay[j],ayjVec);
-		}
+				_mm256_store_pd(&ax[tid*nBodiesPadded + j],axjVec);
+				_mm256_store_pd(&ay[tid*nBodiesPadded + j],ayjVec);
+			}
 
-		// Now need to sum elements of axiUpdVec,ayiUpdVec and add to ax[i],ay[i]
-		axiUpdVec = _mm256_hadd_pd(axiUpdVec,axiUpdVec);
-		ayiUpdVec = _mm256_hadd_pd(ayiUpdVec,ayiUpdVec);
-		ax[i] += ((double*)&axiUpdVec)[0] + ((double*)&axiUpdVec)[2];
-		ay[i] += ((double*)&ayiUpdVec)[0] + ((double*)&ayiUpdVec)[2];
+			// Now need to sum elements of axiUpdVec,ayiUpdVec and add to ax[i],ay[i]
+			axiUpdVec = _mm256_hadd_pd(axiUpdVec,axiUpdVec);
+			ayiUpdVec = _mm256_hadd_pd(ayiUpdVec,ayiUpdVec);
+			ax[tid*nBodiesPadded + i] += ((real_t*)&axiUpdVec)[0] + ((real_t*)&axiUpdVec)[2];
+			ay[tid*nBodiesPadded + i] += ((real_t*)&ayiUpdVec)[0] + ((real_t*)&ayiUpdVec)[2];
 #endif
 
 #ifdef SSE
-		__m128d rxiVec = _mm_set1_pd(rx[i]);
-		__m128d ryiVec = _mm_set1_pd(ry[i]);
-		__m128d massiVec = _mm_set1_pd(mass[i]);
-		__m128d axiUpdVec = _mm_set1_pd(0.0);
-		__m128d ayiUpdVec = _mm_set1_pd(0.0);
+			__m128d rxiVec = _mm_set1_pd(rx[i]);
+			__m128d ryiVec = _mm_set1_pd(ry[i]);
+			__m128d massiVec = _mm_set1_pd(mass[i]);
+			__m128d axiUpdVec = _mm_set1_pd(0.0);
+			__m128d ayiUpdVec = _mm_set1_pd(0.0);
 
-		for (int j = jVecMin; j < jVecMax; j+=VECWIDTH) {
-			__m128d rxjVec = _mm_load_pd(&rx[j]);
-			__m128d ryjVec = _mm_load_pd(&ry[j]);
-			__m128d axjVec = _mm_load_pd(&ax[j]);
-			__m128d ayjVec = _mm_load_pd(&ay[j]);
-			__m128d massjVec = _mm_load_pd(&mass[j]);
+			for (int j = jVecMin; j < jVecMax; j+=VECWIDTH) {
+				__m128d rxjVec = _mm_load_pd(&rx[j]);
+				__m128d ryjVec = _mm_load_pd(&ry[j]);
+				__m128d axjVec = _mm_load_pd(&ax[tid*nBodiesPadded + j]);
+				__m128d ayjVec = _mm_load_pd(&ay[tid*nBodiesPadded + j]);
+				__m128d massjVec = _mm_load_pd(&mass[j]);
 
-			__m128d distxVec = _mm_sub_pd(rxiVec, rxjVec);
-			__m128d distyVec = _mm_sub_pd(ryiVec, ryjVec);
+				__m128d distxVec = _mm_sub_pd(rxiVec, rxjVec);
+				__m128d distyVec = _mm_sub_pd(ryiVec, ryjVec);
 
-			__m128d sqrtRecipDistVec = _mm_div_pd(_mm_set1_pd(1.0),
-			                                         _mm_sqrt_pd(_mm_add_pd(_mm_mul_pd(distxVec,distxVec),
-			                                                                      _mm_mul_pd(distyVec,distyVec))));
-			// cube:
-			sqrtRecipDistVec = _mm_mul_pd(sqrtRecipDistVec,_mm_mul_pd(sqrtRecipDistVec,sqrtRecipDistVec));
+				__m128d sqrtRecipDistVec = _mm_div_pd(_mm_set1_pd(1.0),
+																	  _mm_sqrt_pd(_mm_add_pd(_mm_mul_pd(distxVec,distxVec),
+																											 _mm_mul_pd(distyVec,distyVec))));
+				// cube:
+				sqrtRecipDistVec = _mm_mul_pd(sqrtRecipDistVec,_mm_mul_pd(sqrtRecipDistVec,sqrtRecipDistVec));
 
-			// multiply into distxVec and distyVec
-			distxVec = _mm_mul_pd(distxVec,sqrtRecipDistVec);
-			distyVec = _mm_mul_pd(distyVec,sqrtRecipDistVec);
+				// multiply into distxVec and distyVec
+				distxVec = _mm_mul_pd(distxVec,sqrtRecipDistVec);
+				distyVec = _mm_mul_pd(distyVec,sqrtRecipDistVec);
 
-			// update accelerations
-			axiUpdVec = _mm_add_pd(axiUpdVec,_mm_mul_pd(massjVec,distxVec));
-			ayiUpdVec = _mm_add_pd(ayiUpdVec,_mm_mul_pd(massjVec,distyVec));
-			axjVec = _mm_sub_pd(axjVec,_mm_mul_pd(massiVec,distxVec));
-			ayjVec = _mm_sub_pd(ayjVec,_mm_mul_pd(massiVec,distyVec));
+				// update accelerations
+				axiUpdVec = _mm_add_pd(axiUpdVec,_mm_mul_pd(massjVec,distxVec));
+				ayiUpdVec = _mm_add_pd(ayiUpdVec,_mm_mul_pd(massjVec,distyVec));
+				axjVec = _mm_sub_pd(axjVec,_mm_mul_pd(massiVec,distxVec));
+				ayjVec = _mm_sub_pd(ayjVec,_mm_mul_pd(massiVec,distyVec));
 
 
-			_mm_store_pd(&ax[j],axjVec);
-			_mm_store_pd(&ay[j],ayjVec);
-		}
+				_mm_store_pd(&ax[tid*nBodies + j],axjVec);
+				_mm_store_pd(&ay[tid*nBodies + j],ayjVec);
+			}
 
-		// Now need to sum elements of axiUpdVec,ayiUpdVec and add to ax[i],ay[i]
-		axiUpdVec = _mm_hadd_pd(axiUpdVec,axiUpdVec);
-		ayiUpdVec = _mm_hadd_pd(ayiUpdVec,ayiUpdVec);
-		ax[i] += ((double*)&axiUpdVec)[0];
-		ay[i] += ((double*)&ayiUpdVec)[0];
+			// Now need to sum elements of axiUpdVec,ayiUpdVec and add to ax[i],ay[i]
+			axiUpdVec = _mm_hadd_pd(axiUpdVec,axiUpdVec);
+			ayiUpdVec = _mm_hadd_pd(ayiUpdVec,ayiUpdVec);
+			ax[tid*nBodiesPadded + i] += ((real_t*)&axiUpdVec)[0];
+			ay[tid*nBodiesPadded + i] += ((real_t*)&ayiUpdVec)[0];
 #endif
 
 
-		// final non-vectorized part, iff we didn't already run up to a jVecMin which is larger than jVecMax
-		for (int j = jVecMax; j < nBodies; j++) {
-			distx = rx[i] - rx[j];
-			disty = ry[i] - ry[j];
-			sqrtRecipDist = 1.0/sqrt(distx*distx+disty*disty);
-			ax[i] += (mass[j] * distx * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
-			ay[i] += (mass[j] * disty * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
-			ax[j] -= (mass[i] * distx * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
-			ay[j] -= (mass[i] * disty * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
+			// final non-vectorized part, iff we didn't already run up to a jVecMin which is larger than jVecMax
+			for (int j = jVecMax; j < nBodies; j++) {
+				real_t distx = rx[i] - rx[j];
+				real_t disty = ry[i] - ry[j];
+				real_t sqrtRecipDist = 1.0/sqrt(distx*distx+disty*disty);
+				ax[tid*nBodiesPadded + i] += (mass[j] * distx * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
+				ay[tid*nBodiesPadded + i] += (mass[j] * disty * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
+				ax[tid*nBodiesPadded + j] -= (mass[i] * distx * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
+				ay[tid*nBodiesPadded + j] -= (mass[i] * disty * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
+			}
+		}
+	}
+
+	// Combine ax,ay sums from threads
+	#pragma omp parallel for default(none), shared(ax,ay) firstprivate(threadCount) schedule(static,8)
+	for (int i = 0; i < nBodies; i++) {
+		for (int j = 1; j < threadCount; j++) {
+			ax[i] += ax[j*nBodiesPadded + i];
+			ay[i] += ay[j*nBodiesPadded + i];
 		}
 	}
 
@@ -394,6 +423,7 @@ void ComputeAccelVec(
 
 void UpdatePositions(
 	const int nBodies,
+	const int nBodiesPadded,
 	real_t * restrict rx,
 	real_t * restrict ry,
 	real_t * restrict vx,
@@ -401,6 +431,8 @@ void UpdatePositions(
 	real_t * restrict ax,
 	real_t * restrict ay)
 {
+	// slightly slower with this in parallel. Loop is well vectorized and takes almost none of the runtime.
+	//#pragma omp parallel for default(none) shared(rx,ry, vx,vy, ax,ay) schedule(static,8)
 	for (int i = 0; i < nBodies; i++) {
 			//new force values in .ax, .ay
 			//update pos and vel
@@ -408,16 +440,16 @@ void UpdatePositions(
 			vy[i] += (-G)*STEPSIZE * ay[i];
 			rx[i] += STEPSIZE * vx[i];
 			ry[i] += STEPSIZE * vy[i];
-			//zero accel values to avoid an extra loop in ComputeAccel
-			ax[i] = 0;
-			ay[i] = 0;
 		}
-
+		//zero accel values to avoid an extra loop in ComputeAccel
+		memset(ax, 0, nBodiesPadded * omp_get_max_threads()* sizeof *ax);
+		memset(ax, 0, nBodiesPadded * omp_get_max_threads()* sizeof *ax);
 }
 
 
 void SetInitialConditions(
 	const int nBodies,
+	const int nBodiesPadded,
 	real_t * restrict rx,
 	real_t * restrict ry,
 	real_t * restrict vx,
@@ -434,8 +466,8 @@ void SetInitialConditions(
 		vy[i] = (rand()%3)*pow(-1,rand()%2);
 		mass[i] = 1000;
 	}
-	memset(ax, 0.0, nBodies*omp_get_max_threads() * sizeof *ax);
-	memset(ay, 0.0, nBodies*omp_get_max_threads() * sizeof *ay);
+	memset(ax, 0.0, nBodiesPadded * omp_get_max_threads() * sizeof *ax);
+	memset(ay, 0.0, nBodiesPadded * omp_get_max_threads() * sizeof *ay);
 }
 
 double ErrorCheck(const int nBodies, const real_t * restrict rx)
