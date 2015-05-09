@@ -25,7 +25,7 @@ The Opteron 6128 system is what we will use for MPI testing across multiple node
 ### OpenMP
 Before starting with MPI, we can check how OpenMP code scales with core-count. This gives us something to aim for when running an MPI implementation on a shared memory system. Accounting for the difference in turbo-boost clocks between a single and 4-thread load (i5-2500K) the optimal speedup is 3.82x.
 
-For best performance the OpenMP scheduling needs to be set properly. Since we are only computing the upper triangle of the force matrix, later loops are much faster since they have less work to do. For this reason, we choose `static` scheduling with a small a "chunk-size" as possible (but no smaller than 8, we don't want to induce cache misses and false sharing by making chunks smaller than one cache line).
+For best performance the OpenMP scheduling needs to be set properly. Since we are only computing the upper triangle of the force matrix, later loops are much faster since they have less work to do. For this reason, we choose `static` scheduling with as small a "chunk-size" as possible (but no smaller than 8, we don't want to induce cache misses and false sharing by making chunks smaller than one cache line).
 
 ![OpenMP Scaling](plots/img/3-scaling-sse.png)
 
