@@ -16,9 +16,9 @@
 // Choose precision
 #define DOUBLEPREC 1
 	typedef double real_t;
-//	#define VECWIDTH 1
-	#define AVX 1
-		#define VECWIDTH 4
+	#define VECWIDTH 1
+//	#define AVX 1
+//		#define VECWIDTH 4
 //	#define SSE 1
 //		#define VECWIDTH 2
 
@@ -94,6 +94,7 @@ double GetWallTime(void);
 int main(void)
 {
 	const int nTimeSteps = 20000;
+	//const int nTimeSteps = 100;
 
 	for (int nBodies = 10; nBodies < 100; nBodies += 10) {
 		RunSimulation(nTimeSteps, nBodies);
@@ -101,10 +102,13 @@ int main(void)
 	for (int nBodies = 100; nBodies < 300; nBodies += 20) {
 		RunSimulation(nTimeSteps, nBodies);
 	}
-	for (int nBodies = 300; nBodies <= 1000; nBodies += 100) {
+	for (int nBodies = 300; nBodies < 1000; nBodies += 100) {
 		RunSimulation(nTimeSteps, nBodies);
 	}
-
+	for (int nBodies = 1000; nBodies <= 1000; nBodies += 500) {
+		RunSimulation(nTimeSteps, nBodies);
+	}
+	printf("Complete!\n");
 	return 0;
 }
 
