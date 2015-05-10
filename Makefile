@@ -1,6 +1,10 @@
 all:
-	gcc src/nbody.c -o bin/gccnbody.exe -std=gnu99 -Ofast -funroll-loops -march=core-avx-i -Wall -pedantic -lrt -lm
-	icc src/nbody.c -o bin/iccnbody.exe -std=gnu99 -O3 -xAVX -restrict -Wall -pedantic -lrt -lm
+	mpicc src/nbody.c -o bin/gccnbody.exe -std=gnu99 -Ofast -funroll-loops -march=core-avx-i -Wall -pedantic -lrt -lm -lmpi -g
+	mpicc-vt -vt:cc mpicc src/nbody.c -o bin/vtgccnbody.exe -std=gnu99 -Ofast -funroll-loops -march=core-avx-i -Wall -pedantic -lrt -lm -lmpi
+
+ulg:
+	mpicc src/nbody.c -o bin/gccnbody.exe -std=gnu99 -Ofast -funroll-loops -march=barcelona -Wall -pedantic -lrt -lm -lmpi -g
+	mpicc-vt -vt:cc mpicc src/nbody.c -o bin/vtgccnbody.exe -std=gnu99 -Ofast -funroll-loops -march=barcelona -Wall -pedantic -lrt -lm -lmpi
 
 
 clean:

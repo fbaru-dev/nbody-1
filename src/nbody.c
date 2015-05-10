@@ -1,8 +1,10 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 #include <math.h>
 #include <immintrin.h>
+#include <mpi.h>
 
 
 
@@ -11,17 +13,20 @@
 #define STEPSIZE 0.0001
 #define FORCELIMIT 0.0001
 
-//#define PRINTPOS 1
+// MPI
+#define MASTER 0
+#define IFMASTER if(myRank==0)
+#define IFNOTMASTER if(myRank>0)
 
 // Choose precision
 #define DOUBLEPREC 1
+#define MPI_REAL_T MPI_DOUBLE
 	typedef double real_t;
 	#define VECWIDTH 1
 //	#define AVX 1
 //		#define VECWIDTH 4
 //	#define SSE 1
 //		#define VECWIDTH 2
-
 
 //#define SINGLEPREC 1
 //	typedef float real_t;
@@ -36,9 +41,8 @@
 void RunSimulation(const int ntimeSteps, const int nBodies);
 
 void TimeStep(
-	FILE * plotfile,
 	const int timeStep,
-	const int nBodies,
+	const int *nBodiesBoundaries,
 	real_t * restrict rx,
 	real_t * restrict ry,
 	real_t * restrict vx,
@@ -48,7 +52,7 @@ void TimeStep(
 	const real_t * restrict mass);
 
 void ComputeAccel(
-	const int nBodies,
+	const int *nBodiesBoundaries,
 	const real_t * restrict rx,
 	const real_t * restrict ry,
 	real_t * restrict ax,
@@ -56,7 +60,7 @@ void ComputeAccel(
 	const real_t * restrict mass);
 
 void ComputeAccelVec(
-	const int nBodies,
+	const int *nBodiesBoundaries,
 	const real_t * restrict rx,
 	const real_t * restrict ry,
 	real_t * restrict ax,
@@ -64,7 +68,7 @@ void ComputeAccelVec(
 	const real_t * restrict mass);
 
 void UpdatePositions(
-	const int nBodies,
+	const int *nBodiesBoundaries,
 	real_t * restrict rx,
 	real_t * restrict ry,
 	real_t * restrict vx,
@@ -82,6 +86,17 @@ void SetInitialConditions(
 	real_t * restrict ay,
 	real_t * restrict mass);
 
+void MPIDistributeInitialConditions(
+	const int nBodies,
+	const int *nBodiesBoundaries,
+	real_t * restrict rx,
+	real_t * restrict ry,
+	real_t * restrict vx,
+	real_t * restrict vy,
+	real_t * restrict ax,
+	real_t * restrict ay,
+	real_t * restrict mass);
+
 void PrintPositions(FILE * plotfile, const int nBodies, const real_t * restrict rx, const real_t * restrict ry);
 double ErrorCheck(const int nBodies, const real_t * restrict rx);
 
@@ -91,39 +106,71 @@ double GetWallTime(void);
 
 
 
-int main(void)
+int main(int argc, char** argv)
 {
+	int totalRanks, myRank;
+	MPI_Init(&argc,&argv);
+	MPI_Comm_rank(MPI_COMM_WORLD, &myRank);
+	MPI_Comm_size(MPI_COMM_WORLD, &totalRanks);
+	IFMASTER printf("MPI: totalRanks = %d          \n",totalRanks);
+
+
 	const int nTimeSteps = 20000;
 	//const int nTimeSteps = 100;
 
+/*
 	for (int nBodies = 10; nBodies < 100; nBodies += 10) {
+		MPI_Barrier(MPI_COMM_WORLD);
 		RunSimulation(nTimeSteps, nBodies);
 	}
 	for (int nBodies = 100; nBodies < 300; nBodies += 20) {
+		MPI_Barrier(MPI_COMM_WORLD);
 		RunSimulation(nTimeSteps, nBodies);
 	}
 	for (int nBodies = 300; nBodies < 1000; nBodies += 100) {
+		MPI_Barrier(MPI_COMM_WORLD);
 		RunSimulation(nTimeSteps, nBodies);
 	}
 	for (int nBodies = 1000; nBodies <= 1000; nBodies += 500) {
+		MPI_Barrier(MPI_COMM_WORLD);
 		RunSimulation(nTimeSteps, nBodies);
 	}
-	printf("Complete!\n");
+	* */
+	RunSimulation(nTimeSteps,4000);
+
+	MPI_Finalize();
 	return 0;
 }
 
 
 void RunSimulation(const int nTimeSteps, const int nBodies)
 {
-	double timeElapsed;
+	int totalRanks, myRank;
+	MPI_Comm_rank(MPI_COMM_WORLD, &myRank);
+	MPI_Comm_size(MPI_COMM_WORLD, &totalRanks);
 
-	// files for printing
-	char filename[25];
-	sprintf(filename, "plots/pos%d.dat", nBodies);
-	FILE * datfile = fopen(filename,"w");
-	FILE * plotfile = fopen("plots/plot.plt","w");
+	// Work out how to share the bodies among the ranks.
+	// For now, share evenly. Final rank does any extra that don't divide.
+	int * nBodiesShare = malloc(totalRanks * sizeof (int));
+	for (int r = 0; r < totalRanks-1; r++) {
+		nBodiesShare[r] = nBodies/totalRanks;
+	}
+	nBodiesShare[totalRanks-1] = nBodies/totalRanks + nBodies%totalRanks;
 
-	// Allocate arrays
+	// Compute rank boundaries of bodies. Useful for communications if every rank knows these. Each rank will be looping
+	// from nBodiesBoundaries[rank] up to nBodiesBoundaries[rank+1].
+	int * nBodiesBoundaries = malloc((totalRanks+1) * sizeof (int));
+	nBodiesBoundaries[0] = 0;
+	for (int r = 1; r <= totalRanks; r++) {
+		nBodiesBoundaries[r] = nBodiesBoundaries[r-1]+nBodiesShare[r-1];
+	}
+
+
+	// Allocate arrays. Each rank needs position, mass, accel arrays large enough to hold ALL bodies.
+	// Velocity array only needs to hold the rank's share of bodies.
+	// The master thread allocates enough for everything, so it can set the initial conditions and then broadcast them.
+	int myBodiesAlloc = nBodiesShare[myRank];
+IFMASTER myBodiesAlloc = nBodies;
 	real_t * rx;
 	real_t * ry;
 	real_t * vx;
@@ -133,42 +180,31 @@ void RunSimulation(const int nTimeSteps, const int nBodies)
 	real_t * mass;
 	rx =   _mm_malloc(nBodies * sizeof *rx,32);
 	ry =   _mm_malloc(nBodies * sizeof *ry,32);
-	vx =   _mm_malloc(nBodies * sizeof *vx,32);
-	vy =   _mm_malloc(nBodies * sizeof *vy,32);
 	ax =   _mm_malloc(nBodies * sizeof *ax,32);
 	ay =   _mm_malloc(nBodies * sizeof *ay,32);
 	mass = _mm_malloc(nBodies * sizeof *mass,32);
+	vx =   _mm_malloc(myBodiesAlloc * sizeof *vx,32);
+	vy =   _mm_malloc(myBodiesAlloc * sizeof *vy,32);
 
-	SetInitialConditions(nBodies, rx,ry, vx,vy, ax,ay, mass);
-
-
-
-#ifdef PRINTPOS
-	fprintf(plotfile, "set term pngcairo enhanced size 1024,768\n");
-	fprintf(plotfile, "set output \"test.png\"\n");
-	fprintf(plotfile, "set grid\n");
-	fprintf(plotfile, "set key off\n");
-	fprintf(plotfile, "set xrange [-100:100]\n");
-	fprintf(plotfile, "set yrange [-100:100]\n");
-	fprintf(plotfile, "plot \\\n");
-	for (int i = 0; i < nBodies-1; i++) {
-		fprintf(plotfile, "\"pos.dat\" using %d:%d with linespoints,\\\n", 2*i+1, 2*i+2);
-	}
-	fprintf(plotfile, "\"pos.dat\" using %d:%d with linespoints\n", 2*(nBodies-1)+1, 2*(nBodies-1)+2);
-#endif
+	// Master thread sets the initial conditions, and then sends the relevant data to ranks, ie, a broadcast of position,
+	// accel and mass array, and a send of the relevant section of velocity.
+IFMASTER SetInitialConditions(nBodies, rx,ry, vx,vy, ax,ay, mass);
+	MPIDistributeInitialConditions(nBodies, nBodiesBoundaries, rx,ry, vx,vy, ax,ay, mass);
 
 
-
+	double timeElapsed;
 	timeElapsed = GetWallTime();
 	for (int n = 0; n < nTimeSteps; n++) {
-		TimeStep(datfile, n, nBodies, rx,ry, vx,vy, ax,ay, mass);
+		TimeStep(n, nBodiesBoundaries, rx,ry, vx,vy, ax,ay, mass);
 	}
+	MPI_Barrier(MPI_COMM_WORLD);
 	timeElapsed = GetWallTime() - timeElapsed;
-//	printf("nBodies: %4d, MegaUpdates/second: %lf. Error: %le\n", nBodies, nTimeSteps*nBodies/timeElapsed/1000000.0, ErrorCheck(nBodies, rx));
-	printf("%4d %le %le\n", nBodies, nTimeSteps/timeElapsed/1000000.0, ErrorCheck(nBodies, rx));
+	// Only care about the master thread's timing.
+IFMASTER printf("%4d %le %le\n", nBodies, nTimeSteps/timeElapsed/1000000.0, ErrorCheck(nBodies, rx));
 
 
-
+	free(nBodiesShare);
+	free(nBodiesBoundaries);
 	_mm_free(rx);
 	_mm_free(ry);
 	_mm_free(vx);
@@ -176,17 +212,14 @@ void RunSimulation(const int nTimeSteps, const int nBodies)
 	_mm_free(ax);
 	_mm_free(ay);
 	_mm_free(mass);
-	fclose(plotfile);
-	fclose(datfile);
 
 
 }
 
 
 void TimeStep(
-	FILE * plotfile,
 	const int timeStep,
-	const int nBodies,
+	const int *nBodiesBoundaries,
 	real_t * restrict rx,
 	real_t * restrict ry,
 	real_t * restrict vx,
@@ -195,33 +228,35 @@ void TimeStep(
 	real_t * restrict ay,
 	const real_t * restrict mass)
 {
+	MPI_Barrier(MPI_COMM_WORLD);
 #if defined(AVX) || defined(SSE)
-	ComputeAccelVec(nBodies, rx,ry, ax,ay, mass);
+	ComputeAccelVec(nBodiesBoundaries, rx,ry, ax,ay, mass);
 #else
-	ComputeAccel(nBodies, rx,ry, ax,ay, mass);
+	ComputeAccel(nBodiesBoundaries, rx,ry, ax,ay, mass);
 #endif
 
-	UpdatePositions(nBodies, rx,ry, vx,vy, ax,ay);
-
-#ifdef PRINTPOS
-	if (timeStep % 1000 == 0) {
-		PrintPositions(plotfile, nBodies, rx,ry);
-	}
-#endif
+	MPI_Barrier(MPI_COMM_WORLD);
+	UpdatePositions(nBodiesBoundaries, rx,ry, vx,vy, ax,ay);
 }
 
 
 void ComputeAccel(
-	const int nBodies,
+	const int *nBodiesBoundaries,
 	const real_t * restrict rx,
 	const real_t * restrict ry,
 	real_t * restrict ax,
 	real_t * restrict ay,
 	const real_t * restrict mass)
 {
+	int totalRanks, myRank;
+	MPI_Comm_rank(MPI_COMM_WORLD, &myRank);
+	MPI_Comm_size(MPI_COMM_WORLD, &totalRanks);
+
+	const int nBodies = nBodiesBoundaries[totalRanks];
+
 	double distx, disty, sqrtRecipDist;
 
-	for (int i = 0; i < nBodies; i++) {
+	for (int i = nBodiesBoundaries[myRank]; i < nBodiesBoundaries[myRank+1]; i++) {
 		for (int j = i+1; j < nBodies; j++) {
 			distx = rx[i] - rx[j];
 			disty = ry[i] - ry[j];
@@ -231,33 +266,34 @@ void ComputeAccel(
 			ax[j] -= (mass[i] * distx * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
 			ay[j] -= (mass[i] * disty * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
 
-			// This version with a force-limiting term stops nearby bodies experiencing arbitrarily high
-			// forces. Important for numerical stability, but not for performance testing.
-//			ax[i] += (mass[j] * distx * pow(sqrtRecipDist*sqrtRecipDist+FORCELIMIT,3.0/2.0));
-//			ay[i] += (mass[j] * disty * pow(sqrtRecipDist*sqrtRecipDist+FORCELIMIT,3.0/2.0));
-//			ax[j] -= (mass[i] * distx * pow(sqrtRecipDist*sqrtRecipDist+FORCELIMIT,3.0/2.0));
-//			ay[j] -= (mass[i] * disty * pow(sqrtRecipDist*sqrtRecipDist+FORCELIMIT,3.0/2.0));
 		}
 	}
 
+	// Now each rank is holding partial sums of all acceleration values. Need to do a global reduction
+	MPI_Allreduce(MPI_IN_PLACE, ax, nBodies, MPI_REAL_T, MPI_SUM, MPI_COMM_WORLD);
 }
 
 
 void ComputeAccelVec(
-	const int nBodies,
+	const int *nBodiesBoundaries,
 	const real_t * restrict rx,
 	const real_t * restrict ry,
 	real_t * restrict ax,
 	real_t * restrict ay,
 	const real_t * restrict mass)
 {
+	int totalRanks, myRank;
+	MPI_Comm_rank(MPI_COMM_WORLD, &myRank);
+	MPI_Comm_size(MPI_COMM_WORLD, &totalRanks);
+
 	double distx, disty, sqrtRecipDist;
+	const int nBodies = nBodiesBoundaries[totalRanks];
 
 	// limit of vectorized loop is the multiple of VECWIDTH <= NBODIES
 	// (May have to "clean up" a few bodies at the end)
 	const int jVecMax = VECWIDTH*(nBodies/VECWIDTH);
 
-	for (int i = 0; i < nBodies; i++) {
+	for (int i = nBodiesBoundaries[myRank]; i < nBodiesBoundaries[myRank+1]; i++) {
 
 		// Vectorized j loop starts at multiple of 4 >= i+1
 		const int jVecMin = (VECWIDTH*((i)/VECWIDTH)+VECWIDTH) > nBodies ? nBodies : (VECWIDTH*((i)/VECWIDTH)+VECWIDTH);
@@ -380,10 +416,13 @@ void ComputeAccelVec(
 		}
 	}
 
+	// Now each rank is holding partial sums of all acceleration values. Need to do a global reduction
+	MPI_Allreduce(MPI_IN_PLACE, ax, nBodies, MPI_REAL_T, MPI_SUM, MPI_COMM_WORLD);
+
 }
 
 void UpdatePositions(
-	const int nBodies,
+	const int *nBodiesBoundaries,
 	real_t * restrict rx,
 	real_t * restrict ry,
 	real_t * restrict vx,
@@ -391,17 +430,29 @@ void UpdatePositions(
 	real_t * restrict ax,
 	real_t * restrict ay)
 {
-	for (int i = 0; i < nBodies; i++) {
+	int totalRanks, myRank;
+	MPI_Comm_rank(MPI_COMM_WORLD, &myRank);
+	MPI_Comm_size(MPI_COMM_WORLD, &totalRanks);
+
+
+	for (int i = nBodiesBoundaries[myRank]; i < nBodiesBoundaries[myRank+1]; i++) {
 			//new force values in .ax, .ay
 			//update pos and vel
-			vx[i] += (-G)*STEPSIZE * ax[i];
-			vy[i] += (-G)*STEPSIZE * ay[i];
-			rx[i] += STEPSIZE * vx[i];
-			ry[i] += STEPSIZE * vy[i];
-			//zero accel values to avoid an extra loop in ComputeAccel
-			ax[i] = 0;
-			ay[i] = 0;
+			vx[i-nBodiesBoundaries[myRank]] += (-G)*STEPSIZE * ax[i];
+			vy[i-nBodiesBoundaries[myRank]] += (-G)*STEPSIZE * ay[i];
+			rx[i] += STEPSIZE * vx[i-nBodiesBoundaries[myRank]];
+			ry[i] += STEPSIZE * vy[i-nBodiesBoundaries[myRank]];
 		}
+
+	//zero rank's accel values ready for next timestep
+	memset(ax, 0, nBodiesBoundaries[totalRanks] * sizeof *ax);
+	memset(ax, 0, nBodiesBoundaries[totalRanks] * sizeof *ay);
+
+	// Now we need to broadcast the updated positions to every rank.
+	for (int r = 0; r < totalRanks; r++) {
+		MPI_Bcast(&rx[nBodiesBoundaries[r]], nBodiesBoundaries[r+1]-nBodiesBoundaries[r], MPI_REAL_T, r, MPI_COMM_WORLD);
+		MPI_Bcast(&ry[nBodiesBoundaries[r]], nBodiesBoundaries[r+1]-nBodiesBoundaries[r], MPI_REAL_T, r, MPI_COMM_WORLD);
+	}
 
 }
 
@@ -427,6 +478,44 @@ void SetInitialConditions(
 		mass[i] = 1000;
 	}
 }
+
+void MPIDistributeInitialConditions(
+	const int nBodies,
+	const int *nBodiesBoundaries,
+	real_t * restrict rx,
+	real_t * restrict ry,
+	real_t * restrict vx,
+	real_t * restrict vy,
+	real_t * restrict ax,
+	real_t * restrict ay,
+	real_t * restrict mass)
+{
+	int totalRanks, myRank;
+	MPI_Comm_rank(MPI_COMM_WORLD, &myRank);
+	MPI_Comm_size(MPI_COMM_WORLD, &totalRanks);
+
+	// Send all positions, accelerations and masses to all ranks.
+	MPI_Bcast(rx, nBodies, MPI_REAL_T, MASTER, MPI_COMM_WORLD);
+	MPI_Bcast(ry, nBodies, MPI_REAL_T, MASTER, MPI_COMM_WORLD);
+	MPI_Bcast(ax, nBodies, MPI_REAL_T, MASTER, MPI_COMM_WORLD);
+	MPI_Bcast(ay, nBodies, MPI_REAL_T, MASTER, MPI_COMM_WORLD);
+	MPI_Bcast(mass, nBodies, MPI_REAL_T, MASTER, MPI_COMM_WORLD);
+
+	// Master sends shares of velocity
+IFMASTER {
+	for (int r = 1; r < totalRanks; r++) {
+		MPI_Send(&vx[nBodiesBoundaries[r]], nBodiesBoundaries[r+1]-nBodiesBoundaries[r], MPI_REAL_T, r, r, MPI_COMM_WORLD);
+		MPI_Send(&vy[nBodiesBoundaries[r]], nBodiesBoundaries[r+1]-nBodiesBoundaries[r], MPI_REAL_T, r, r, MPI_COMM_WORLD);
+	}
+}
+
+IFNOTMASTER {
+	MPI_Recv(vx, nBodiesBoundaries[myRank+1]-nBodiesBoundaries[myRank], MPI_REAL_T, MASTER, myRank, MPI_COMM_WORLD, NULL);
+	MPI_Recv(vy, nBodiesBoundaries[myRank+1]-nBodiesBoundaries[myRank], MPI_REAL_T, MASTER, myRank, MPI_COMM_WORLD, NULL);
+}
+
+}
+
 
 double ErrorCheck(const int nBodies, const real_t * restrict rx)
 {
