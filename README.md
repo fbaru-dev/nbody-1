@@ -1,7 +1,7 @@
 # nbody
 n-body solver, with the aim of writing a fast MPI implementation.
 
-For the n-body problem this is a little non-trivial since each timestep the position of every body is needed, so it is something of a communication-heavy problem. Cluster available for testing has only a Gigabit Ethernet interconnect, so efficient communication will be essential.
+For the n-body problem this is a little non-trivial since each timestep the position of every body is needed and we need to do a reduction of the acceleration contributions, so it is something of a communication-heavy problem. Cluster available for testing has only a Gigabit Ethernet interconnect, so efficient communication will be essential.
 
 For each pair of bodies, we need to compute Fij = G\*mi\*mj\*(ri-rj)/|ri-rj|^3. Since the forces are equal and opposite, we only have to compute the upper triangle of this matrix. The forces give us acceleration values, which we use to update the velocity and position using a simple Euler integration.
 
@@ -22,6 +22,7 @@ Additionally, these instructions on Intel Ivy-Bridge CPUs have only 64% of the l
 
 The Opteron 6128 system is what we will use for MPI testing across multiple nodes.
 
+
 ### OpenMP
 Before starting with MPI, we can check how OpenMP code scales with core-count. This gives us something to aim for when running an MPI implementation on a shared memory system. Accounting for the difference in turbo-boost clocks between a single and 4-thread load (i5-2500K) the optimal speedup is 3.82x.
 
@@ -34,3 +35,50 @@ For large numbers of bodies scaling is very good, with most configurations reach
 Also, at the maximum core counts, we benefit from making NUMA-friendly memory allocations, achieved here simply by parallelising the initialization routine to expolit the "first touch" policy used by the Linux OS.
 
 On a shared memory system, then, we expect a good MPI implementation also to achieve near-optimal scaling with core count for large numbers of bodies.
+
+
+### MPI
+We initially choose simply to split the particles evenly among the MPI ranks. When using OpenMP we saw that it was important to choose the scheduling properly to obtain good scaling, so this will not be well-performing code.
+
+The procedure is as follows:
+*	Master thread generates initial conditions, and then sends the position, acceleration and mass of all bodies to all threads, and the velocity of the bodies to the appropriate threads.
+*	Each thread computes acceleration contributions for pairings between its share of bodies and all other bodies.
+*	Global reduction of acceleration contributions using `MPI_Allreduce`.
+*	Each thread updates its bodies positions, and uses `MPI_Bcast` to send the new positions to all other threads.
+
+As expected, the performance is poor for this work-sharing scheme (marked `Equal` in the plot).
+
+![Equal sharing, Vampir](plots/img/4-badloadbalance.png)
+
+Using VampirTrace and Vampir, we can see that threads computing accelerations from particles near the end of the loop finish very quickly, and block in `MPI_Allreduce`, waiting for the other threads to complete their work. The actual reduction takes very little time.
+
+#### Better load-balancing
+We should share the work evenly among the threads. We have to run the `ComputeAccel` loop body n^2/2 times, so if we have p threads, we want each to do n^2/(2p) of these. This can be achieved by having each thread run up to body number n-(p+Sqrt((-1+n) p (-(rank+1)n+(n-1)p)))/p, suitably rounded, from the maximum of the rank below it (from body 0, for rank 0).
+
+![Balanced sharing, Vampir](plots/img/4-betterloadbalance.png)
+
+This scheme seems to have worked well. With 16 threads (no SSE!) we now spend around 5.5% of the time communicating, and the scaling with thread count is much better.
+
+![MPI Scaling](plots/img/4-plot.png)
+
+#### More than one node...
+The cluster available for testing has only gigabit ethernet interconnects. As soon as we start splitting ranks across nodes, performance degrades. If we run 16 threads (no SSE!) as above but with 8 on each of two nodes, communication accounts for 25% of the runtime. With SSE, this percentage would be higher.
+
+We can try to run with a larger problem size. The computation scales with nBodies^2, whereas the data transfer scales linearly.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
