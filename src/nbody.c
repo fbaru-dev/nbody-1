@@ -22,9 +22,9 @@
 #define DOUBLEPREC 1
 #define MPI_REAL_T MPI_DOUBLE
 	typedef double real_t;
-	#define VECWIDTH 1
-//	#define AVX 1
-//		#define VECWIDTH 4
+//	#define VECWIDTH 1
+	#define AVX 1
+		#define VECWIDTH 4
 //	#define SSE 1
 //		#define VECWIDTH 2
 
@@ -131,11 +131,11 @@ int main(int argc, char** argv)
 		MPI_Barrier(MPI_COMM_WORLD);
 		RunSimulation(nTimeSteps, nBodies);
 	}
-	for (int nBodies = 1000; nBodies <= 1000; nBodies += 500) {
+	for (int nBodies = 1000; nBodies <= 4000; nBodies += 500) {
 		MPI_Barrier(MPI_COMM_WORLD);
 		RunSimulation(nTimeSteps, nBodies);
 	}
-	* */
+*/
 	RunSimulation(nTimeSteps,4000);
 
 	MPI_Finalize();
@@ -149,27 +149,30 @@ void RunSimulation(const int nTimeSteps, const int nBodies)
 	MPI_Comm_rank(MPI_COMM_WORLD, &myRank);
 	MPI_Comm_size(MPI_COMM_WORLD, &totalRanks);
 
-	// Work out how to share the bodies among the ranks.
-	// For now, share evenly. Final rank does any extra that don't divide.
-	int * nBodiesShare = malloc(totalRanks * sizeof (int));
-	for (int r = 0; r < totalRanks-1; r++) {
-		nBodiesShare[r] = nBodies/totalRanks;
-	}
-	nBodiesShare[totalRanks-1] = nBodies/totalRanks + nBodies%totalRanks;
 
-	// Compute rank boundaries of bodies. Useful for communications if every rank knows these. Each rank will be looping
-	// from nBodiesBoundaries[rank] up to nBodiesBoundaries[rank+1].
+	// Share bodies between ranks, with the aim of creating an even work-share.
 	int * nBodiesBoundaries = malloc((totalRanks+1) * sizeof (int));
 	nBodiesBoundaries[0] = 0;
-	for (int r = 1; r <= totalRanks; r++) {
-		nBodiesBoundaries[r] = nBodiesBoundaries[r-1]+nBodiesShare[r-1];
+	for (int r = 0; r < totalRanks-1; r++) {
+		nBodiesBoundaries[r+1] = (int)(nBodies - (totalRanks + sqrt((double)((nBodies-1)*(double)totalRanks*(-(r+1)*nBodies +(nBodies-1)*totalRanks))))/(double)totalRanks);
+	}
+	nBodiesBoundaries[totalRanks] = nBodies;
+
+
+	// if nBodies is small this scheme does not work, so share evenly if nBodiesBoundaries[1] <= 0
+	if (nBodiesBoundaries[1] <= 0) {
+		nBodiesBoundaries[0] = 0;
+		for (int r = 1; r < totalRanks; r++) {
+			nBodiesBoundaries[r] = nBodiesBoundaries[r-1] + nBodies/totalRanks;
+		}
+		nBodiesBoundaries[totalRanks] = nBodiesBoundaries[totalRanks-1] + nBodies%totalRanks;
 	}
 
 
 	// Allocate arrays. Each rank needs position, mass, accel arrays large enough to hold ALL bodies.
 	// Velocity array only needs to hold the rank's share of bodies.
 	// The master thread allocates enough for everything, so it can set the initial conditions and then broadcast them.
-	int myBodiesAlloc = nBodiesShare[myRank];
+	int myBodiesAlloc = nBodiesBoundaries[myRank+1]-nBodiesBoundaries[myRank];
 IFMASTER myBodiesAlloc = nBodies;
 	real_t * rx;
 	real_t * ry;
@@ -203,7 +206,7 @@ IFMASTER SetInitialConditions(nBodies, rx,ry, vx,vy, ax,ay, mass);
 IFMASTER printf("%4d %le %le\n", nBodies, nTimeSteps/timeElapsed/1000000.0, ErrorCheck(nBodies, rx));
 
 
-	free(nBodiesShare);
+
 	free(nBodiesBoundaries);
 	_mm_free(rx);
 	_mm_free(ry);
