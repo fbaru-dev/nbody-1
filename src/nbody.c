@@ -22,9 +22,9 @@
 #define DOUBLEPREC 1
 #define MPI_REAL_T MPI_DOUBLE
 	typedef double real_t;
-//	#define VECWIDTH 1
-	#define AVX 1
-		#define VECWIDTH 4
+	#define VECWIDTH 1
+//	#define AVX 1
+//		#define VECWIDTH 4
 //	#define SSE 1
 //		#define VECWIDTH 2
 
@@ -52,7 +52,19 @@ void TimeStep(
 	const real_t * restrict mass);
 
 void ComputeAccel(
-	const int *nBodiesBoundaries,
+	const int iMin,
+	const int iMax,
+	const int jMin,
+	const int jMax,
+	const real_t * restrict rx,
+	const real_t * restrict ry,
+	real_t * restrict ax,
+	real_t * restrict ay,
+	const real_t * restrict mass);
+
+void ComputeAccelLocal(
+	const int iMin,
+	const int iMax,
 	const real_t * restrict rx,
 	const real_t * restrict ry,
 	real_t * restrict ax,
@@ -60,7 +72,19 @@ void ComputeAccel(
 	const real_t * restrict mass);
 
 void ComputeAccelVec(
-	const int *nBodiesBoundaries,
+	const int iMin,
+	const int iMax,
+	const int jMin,
+	const int jMax,
+	const real_t * restrict rx,
+	const real_t * restrict ry,
+	real_t * restrict ax,
+	real_t * restrict ay,
+	const real_t * restrict mass);
+
+void ComputeAccelLocalVec(
+	const int iMin,
+	const int iMax,
 	const real_t * restrict rx,
 	const real_t * restrict ry,
 	real_t * restrict ax,
@@ -118,11 +142,12 @@ int main(int argc, char** argv)
 	const int nTimeSteps = 20000;
 	//const int nTimeSteps = 100;
 
-/*
-	for (int nBodies = 10; nBodies < 100; nBodies += 10) {
+
+	for (int nBodies = 10; nBodies < 101; nBodies += 10) {
 		MPI_Barrier(MPI_COMM_WORLD);
 		RunSimulation(nTimeSteps, nBodies);
 	}
+	/*
 	for (int nBodies = 100; nBodies < 300; nBodies += 20) {
 		MPI_Barrier(MPI_COMM_WORLD);
 		RunSimulation(nTimeSteps, nBodies);
@@ -136,7 +161,7 @@ int main(int argc, char** argv)
 		RunSimulation(nTimeSteps, nBodies);
 	}
 */
-	RunSimulation(nTimeSteps,4000);
+	//RunSimulation(nTimeSteps,4000);
 
 	MPI_Finalize();
 	return 0;
@@ -165,8 +190,14 @@ void RunSimulation(const int nTimeSteps, const int nBodies)
 		for (int r = 1; r < totalRanks; r++) {
 			nBodiesBoundaries[r] = nBodiesBoundaries[r-1] + nBodies/totalRanks;
 		}
-		nBodiesBoundaries[totalRanks] = nBodiesBoundaries[totalRanks-1] + nBodies%totalRanks;
+		nBodiesBoundaries[totalRanks] = nBodies;
 	}
+
+//IFMASTER {
+//	for (int r = 0; r < totalRanks; r++) {
+//		printf("---rank %d: range (%d,%d)\n", r, nBodiesBoundaries[r], nBodiesBoundaries[r+1]);
+//	}
+//}
 
 
 	// Allocate arrays. Each rank needs position, mass, accel arrays large enough to hold ALL bodies.
@@ -231,36 +262,56 @@ void TimeStep(
 	real_t * restrict ay,
 	const real_t * restrict mass)
 {
+	int totalRanks, myRank;
+	MPI_Comm_rank(MPI_COMM_WORLD, &myRank);
+	MPI_Comm_size(MPI_COMM_WORLD, &totalRanks);
+	const int nBodies = nBodiesBoundaries[totalRanks];
+
 	MPI_Barrier(MPI_COMM_WORLD);
 #if defined(AVX) || defined(SSE)
-	ComputeAccelVec(nBodiesBoundaries, rx,ry, ax,ay, mass);
+	ComputeAccelLocalVec(nBodiesBoundaries[myRank],
+	                     nBodiesBoundaries[myRank+1], rx,ry, ax,ay, mass);
+	ComputeAccelVec(nBodiesBoundaries[myRank],
+	                nBodiesBoundaries[myRank+1],
+	                nBodiesBoundaries[myRank+1],
+	                nBodies, rx,ry, ax,ay, mass);
 #else
-	ComputeAccel(nBodiesBoundaries, rx,ry, ax,ay, mass);
+	ComputeAccelLocal(nBodiesBoundaries[myRank],
+	                  nBodiesBoundaries[myRank+1], rx,ry, ax,ay, mass);
+	ComputeAccel(nBodiesBoundaries[myRank],
+	             nBodiesBoundaries[myRank+1],
+	             nBodiesBoundaries[myRank+1],
+	             nBodies, rx,ry, ax,ay, mass);
 #endif
+
+	// Now each rank is holding partial sums of all acceleration values. Need to do a global reduction
+	MPI_Allreduce(MPI_IN_PLACE, ax, nBodies, MPI_REAL_T, MPI_SUM, MPI_COMM_WORLD);
+	MPI_Allreduce(MPI_IN_PLACE, ay, nBodies, MPI_REAL_T, MPI_SUM, MPI_COMM_WORLD);
 
 	MPI_Barrier(MPI_COMM_WORLD);
 	UpdatePositions(nBodiesBoundaries, rx,ry, vx,vy, ax,ay);
+
+	// Now we need to broadcast the updated positions to every rank.
+	for (int r = 0; r < totalRanks; r++) {
+		MPI_Bcast(&rx[nBodiesBoundaries[r]], nBodiesBoundaries[r+1]-nBodiesBoundaries[r], MPI_REAL_T, r, MPI_COMM_WORLD);
+		MPI_Bcast(&ry[nBodiesBoundaries[r]], nBodiesBoundaries[r+1]-nBodiesBoundaries[r], MPI_REAL_T, r, MPI_COMM_WORLD);
+	}
 }
 
 
-void ComputeAccel(
-	const int *nBodiesBoundaries,
+void ComputeAccelLocal(
+	const int iMin,
+	const int iMax,
 	const real_t * restrict rx,
 	const real_t * restrict ry,
 	real_t * restrict ax,
 	real_t * restrict ay,
 	const real_t * restrict mass)
 {
-	int totalRanks, myRank;
-	MPI_Comm_rank(MPI_COMM_WORLD, &myRank);
-	MPI_Comm_size(MPI_COMM_WORLD, &totalRanks);
-
-	const int nBodies = nBodiesBoundaries[totalRanks];
-
 	double distx, disty, sqrtRecipDist;
 
-	for (int i = nBodiesBoundaries[myRank]; i < nBodiesBoundaries[myRank+1]; i++) {
-		for (int j = i+1; j < nBodies; j++) {
+	for (int i = iMin; i < iMax; i++) {
+		for (int j = i+1; j < iMax; j++) {
 			distx = rx[i] - rx[j];
 			disty = ry[i] - ry[j];
 			sqrtRecipDist = 1.0/sqrt(distx*distx+disty*disty);
@@ -272,34 +323,198 @@ void ComputeAccel(
 		}
 	}
 
-	// Now each rank is holding partial sums of all acceleration values. Need to do a global reduction
-	MPI_Allreduce(MPI_IN_PLACE, ax, nBodies, MPI_REAL_T, MPI_SUM, MPI_COMM_WORLD);
 }
 
-
-void ComputeAccelVec(
-	const int *nBodiesBoundaries,
+void ComputeAccel(
+	const int iMin,
+	const int iMax,
+	const int jMin,
+	const int jMax,
 	const real_t * restrict rx,
 	const real_t * restrict ry,
 	real_t * restrict ax,
 	real_t * restrict ay,
 	const real_t * restrict mass)
 {
-	int totalRanks, myRank;
-	MPI_Comm_rank(MPI_COMM_WORLD, &myRank);
-	MPI_Comm_size(MPI_COMM_WORLD, &totalRanks);
-
 	double distx, disty, sqrtRecipDist;
-	const int nBodies = nBodiesBoundaries[totalRanks];
+
+	for (int i = iMin; i < iMax; i++) {
+		for (int j = jMin; j < jMax; j++) {
+			distx = rx[i] - rx[j];
+			disty = ry[i] - ry[j];
+			sqrtRecipDist = 1.0/sqrt(distx*distx+disty*disty);
+			ax[i] += (mass[j] * distx * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
+			ay[i] += (mass[j] * disty * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
+			ax[j] -= (mass[i] * distx * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
+			ay[j] -= (mass[i] * disty * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
+
+		}
+	}
+
+}
+
+
+void ComputeAccelVec(
+	const int iMin,
+	const int iMax,
+	const int jMin,
+	const int jMax,
+	const real_t * restrict rx,
+	const real_t * restrict ry,
+	real_t * restrict ax,
+	real_t * restrict ay,
+	const real_t * restrict mass)
+{
+	double distx, disty, sqrtRecipDist;
 
 	// limit of vectorized loop is the multiple of VECWIDTH <= NBODIES
 	// (May have to "clean up" a few bodies at the end)
-	const int jVecMax = VECWIDTH*(nBodies/VECWIDTH);
+	const int jVecMax = VECWIDTH*(jMax/VECWIDTH);
 
-	for (int i = nBodiesBoundaries[myRank]; i < nBodiesBoundaries[myRank+1]; i++) {
+	for (int i = iMin; i < iMax; i++) {
 
 		// Vectorized j loop starts at multiple of 4 >= i+1
-		const int jVecMin = (VECWIDTH*((i)/VECWIDTH)+VECWIDTH) > nBodies ? nBodies : (VECWIDTH*((i)/VECWIDTH)+VECWIDTH);
+		const int jVecMin = (VECWIDTH*((jMin)/VECWIDTH)+VECWIDTH) > jMax ? jMax : (VECWIDTH*((jMin)/VECWIDTH)+VECWIDTH);
+
+		// first initial non-vectorized part
+		for (int j = jMin; j < jVecMin; j++) {
+			distx = rx[i] - rx[j];
+			disty = ry[i] - ry[j];
+			sqrtRecipDist = 1.0/sqrt(distx*distx+disty*disty);
+			ax[i] += (mass[j] * distx * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
+			ay[i] += (mass[j] * disty * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
+			ax[j] -= (mass[i] * distx * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
+			ay[j] -= (mass[i] * disty * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
+		}
+
+		// if we have already finished, break out of the loop early
+		if (jVecMax < jVecMin) break;
+
+
+		// main vectorized part. Here we have code for both AVX and SSE
+#ifdef AVX
+		__m256d rxiVec = _mm256_set1_pd(rx[i]);
+		__m256d ryiVec = _mm256_set1_pd(ry[i]);
+		__m256d massiVec = _mm256_set1_pd(mass[i]);
+		__m256d axiUpdVec = _mm256_set1_pd(0.0);
+		__m256d ayiUpdVec = _mm256_set1_pd(0.0);
+
+		for (int j = jVecMin; j < jVecMax; j+=VECWIDTH) {
+			__m256d rxjVec = _mm256_load_pd(&rx[j]);
+			__m256d ryjVec = _mm256_load_pd(&ry[j]);
+			__m256d axjVec = _mm256_load_pd(&ax[j]);
+			__m256d ayjVec = _mm256_load_pd(&ay[j]);
+			__m256d massjVec = _mm256_load_pd(&mass[j]);
+
+			__m256d distxVec = _mm256_sub_pd(rxiVec, rxjVec);
+			__m256d distyVec = _mm256_sub_pd(ryiVec, ryjVec);
+
+			__m256d sqrtRecipDistVec = _mm256_div_pd(_mm256_set1_pd(1.0),
+			                                         _mm256_sqrt_pd(_mm256_add_pd(_mm256_mul_pd(distxVec,distxVec),
+			                                                                      _mm256_mul_pd(distyVec,distyVec))));
+			// cube:
+			sqrtRecipDistVec = _mm256_mul_pd(sqrtRecipDistVec,_mm256_mul_pd(sqrtRecipDistVec,sqrtRecipDistVec));
+
+			// multiply into distxVec and distyVec
+			distxVec = _mm256_mul_pd(distxVec,sqrtRecipDistVec);
+			distyVec = _mm256_mul_pd(distyVec,sqrtRecipDistVec);
+
+			// update accelerations
+			axiUpdVec = _mm256_add_pd(axiUpdVec,_mm256_mul_pd(massjVec,distxVec));
+			ayiUpdVec = _mm256_add_pd(ayiUpdVec,_mm256_mul_pd(massjVec,distyVec));
+			axjVec = _mm256_sub_pd(axjVec,_mm256_mul_pd(massiVec,distxVec));
+			ayjVec = _mm256_sub_pd(ayjVec,_mm256_mul_pd(massiVec,distyVec));
+
+			_mm256_store_pd(&ax[j],axjVec);
+			_mm256_store_pd(&ay[j],ayjVec);
+		}
+
+		// Now need to sum elements of axiUpdVec,ayiUpdVec and add to ax[i],ay[i]
+		axiUpdVec = _mm256_hadd_pd(axiUpdVec,axiUpdVec);
+		ayiUpdVec = _mm256_hadd_pd(ayiUpdVec,ayiUpdVec);
+		ax[i] += ((double*)&axiUpdVec)[0] + ((double*)&axiUpdVec)[2];
+		ay[i] += ((double*)&ayiUpdVec)[0] + ((double*)&ayiUpdVec)[2];
+#endif
+
+#ifdef SSE
+		__m128d rxiVec = _mm_set1_pd(rx[i]);
+		__m128d ryiVec = _mm_set1_pd(ry[i]);
+		__m128d massiVec = _mm_set1_pd(mass[i]);
+		__m128d axiUpdVec = _mm_set1_pd(0.0);
+		__m128d ayiUpdVec = _mm_set1_pd(0.0);
+
+		for (int j = jVecMin; j < jVecMax; j+=VECWIDTH) {
+			__m128d rxjVec = _mm_load_pd(&rx[j]);
+			__m128d ryjVec = _mm_load_pd(&ry[j]);
+			__m128d axjVec = _mm_load_pd(&ax[j]);
+			__m128d ayjVec = _mm_load_pd(&ay[j]);
+			__m128d massjVec = _mm_load_pd(&mass[j]);
+
+			__m128d distxVec = _mm_sub_pd(rxiVec, rxjVec);
+			__m128d distyVec = _mm_sub_pd(ryiVec, ryjVec);
+
+			__m128d sqrtRecipDistVec = _mm_div_pd(_mm_set1_pd(1.0),
+			                                         _mm_sqrt_pd(_mm_add_pd(_mm_mul_pd(distxVec,distxVec),
+			                                                                      _mm_mul_pd(distyVec,distyVec))));
+			// cube:
+			sqrtRecipDistVec = _mm_mul_pd(sqrtRecipDistVec,_mm_mul_pd(sqrtRecipDistVec,sqrtRecipDistVec));
+
+			// multiply into distxVec and distyVec
+			distxVec = _mm_mul_pd(distxVec,sqrtRecipDistVec);
+			distyVec = _mm_mul_pd(distyVec,sqrtRecipDistVec);
+
+			// update accelerations
+			axiUpdVec = _mm_add_pd(axiUpdVec,_mm_mul_pd(massjVec,distxVec));
+			ayiUpdVec = _mm_add_pd(ayiUpdVec,_mm_mul_pd(massjVec,distyVec));
+			axjVec = _mm_sub_pd(axjVec,_mm_mul_pd(massiVec,distxVec));
+			ayjVec = _mm_sub_pd(ayjVec,_mm_mul_pd(massiVec,distyVec));
+
+
+			_mm_store_pd(&ax[j],axjVec);
+			_mm_store_pd(&ay[j],ayjVec);
+		}
+
+		// Now need to sum elements of axiUpdVec,ayiUpdVec and add to ax[i],ay[i]
+		axiUpdVec = _mm_hadd_pd(axiUpdVec,axiUpdVec);
+		ayiUpdVec = _mm_hadd_pd(ayiUpdVec,ayiUpdVec);
+		ax[i] += ((double*)&axiUpdVec)[0];
+		ay[i] += ((double*)&ayiUpdVec)[0];
+#endif
+
+
+		// final non-vectorized part, iff we didn't already run up to a jVecMin which is larger than jVecMax
+		for (int j = jVecMax; j < jMax; j++) {
+			distx = rx[i] - rx[j];
+			disty = ry[i] - ry[j];
+			sqrtRecipDist = 1.0/sqrt(distx*distx+disty*disty);
+			ax[i] += (mass[j] * distx * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
+			ay[i] += (mass[j] * disty * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
+			ax[j] -= (mass[i] * distx * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
+			ay[j] -= (mass[i] * disty * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
+		}
+	}
+
+}
+
+void ComputeAccelLocalVec(
+	const int iMin,
+	const int iMax,
+	const real_t * restrict rx,
+	const real_t * restrict ry,
+	real_t * restrict ax,
+	real_t * restrict ay,
+	const real_t * restrict mass)
+{
+	double distx, disty, sqrtRecipDist;
+
+	// limit of vectorized loop is the multiple of VECWIDTH <= NBODIES
+	// (May have to "clean up" a few bodies at the end)
+	const int jVecMax = VECWIDTH*(iMax/VECWIDTH);
+
+	for (int i = iMin; i < iMax; i++) {
+
+		// Vectorized j loop starts at multiple of 4 >= i+1
+		const int jVecMin = (VECWIDTH*((i)/VECWIDTH)+VECWIDTH) > iMax ? iMax : (VECWIDTH*((i)/VECWIDTH)+VECWIDTH);
 
 		// first initial non-vectorized part
 		for (int j = i+1; j < jVecMin; j++) {
@@ -408,7 +623,7 @@ void ComputeAccelVec(
 
 
 		// final non-vectorized part, iff we didn't already run up to a jVecMin which is larger than jVecMax
-		for (int j = jVecMax; j < nBodies; j++) {
+		for (int j = jVecMax; j < iMax; j++) {
 			distx = rx[i] - rx[j];
 			disty = ry[i] - ry[j];
 			sqrtRecipDist = 1.0/sqrt(distx*distx+disty*disty);
@@ -418,9 +633,6 @@ void ComputeAccelVec(
 			ay[j] -= (mass[i] * disty * sqrtRecipDist*sqrtRecipDist*sqrtRecipDist);
 		}
 	}
-
-	// Now each rank is holding partial sums of all acceleration values. Need to do a global reduction
-	MPI_Allreduce(MPI_IN_PLACE, ax, nBodies, MPI_REAL_T, MPI_SUM, MPI_COMM_WORLD);
 
 }
 
@@ -439,7 +651,7 @@ void UpdatePositions(
 
 
 	for (int i = nBodiesBoundaries[myRank]; i < nBodiesBoundaries[myRank+1]; i++) {
-			//new force values in .ax, .ay
+			//new force values in ax, ay
 			//update pos and vel
 			vx[i-nBodiesBoundaries[myRank]] += (-G)*STEPSIZE * ax[i];
 			vy[i-nBodiesBoundaries[myRank]] += (-G)*STEPSIZE * ay[i];
@@ -449,13 +661,7 @@ void UpdatePositions(
 
 	//zero rank's accel values ready for next timestep
 	memset(ax, 0, nBodiesBoundaries[totalRanks] * sizeof *ax);
-	memset(ax, 0, nBodiesBoundaries[totalRanks] * sizeof *ay);
-
-	// Now we need to broadcast the updated positions to every rank.
-	for (int r = 0; r < totalRanks; r++) {
-		MPI_Bcast(&rx[nBodiesBoundaries[r]], nBodiesBoundaries[r+1]-nBodiesBoundaries[r], MPI_REAL_T, r, MPI_COMM_WORLD);
-		MPI_Bcast(&ry[nBodiesBoundaries[r]], nBodiesBoundaries[r+1]-nBodiesBoundaries[r], MPI_REAL_T, r, MPI_COMM_WORLD);
-	}
+	memset(ay, 0, nBodiesBoundaries[totalRanks] * sizeof *ay);
 
 }
 
@@ -511,7 +717,7 @@ IFMASTER {
 		MPI_Send(&vy[nBodiesBoundaries[r]], nBodiesBoundaries[r+1]-nBodiesBoundaries[r], MPI_REAL_T, r, r, MPI_COMM_WORLD);
 	}
 }
-
+	// Other ranks receive shares of velocity
 IFNOTMASTER {
 	MPI_Recv(vx, nBodiesBoundaries[myRank+1]-nBodiesBoundaries[myRank], MPI_REAL_T, MASTER, myRank, MPI_COMM_WORLD, NULL);
 	MPI_Recv(vy, nBodiesBoundaries[myRank+1]-nBodiesBoundaries[myRank], MPI_REAL_T, MASTER, myRank, MPI_COMM_WORLD, NULL);
