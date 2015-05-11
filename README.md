@@ -55,29 +55,23 @@ Using VampirTrace and Vampir, we can see that threads computing accelerations fr
 #### Better load-balancing
 We should share the work evenly among the threads. We have to run the `ComputeAccel` loop body n^2/2 times, so if we have p threads, we want each to do n^2/(2p) of these. This can be achieved by having each thread run up to body number n-(p+Sqrt((-1+n) p (-(rank+1)n+(n-1)p)))/p, suitably rounded, from the maximum of the rank below it (from body 0, for rank 0).
 
-![Balanced sharing, Vampir](plots/img/4-betterloadbalance.png)
+![Balanced sharing, Vampir](plots/img/4-goodloadbalance.png)
 
 This scheme seems to have worked well. With 16 threads (no SSE!) we now spend around 5.5% of the time communicating, and the scaling with thread count is much better.
 
 ![MPI Scaling](plots/img/4-plot.png)
 
 #### More than one node...
-The cluster available for testing has only gigabit ethernet interconnects. As soon as we start splitting ranks across nodes, performance degrades. If we run 16 threads (no SSE!) as above but with 8 on each of two nodes, communication accounts for 25% of the runtime. With SSE, this percentage would be higher.
+The cluster available for testing has only gigabit ethernet interconnects. As soon as we start splitting ranks across nodes, performance degrades. If we run 16 threads (no SSE!) as above but with 1 thread on each of 16 nodes, communication accounts for some 35% of the runtime:
 
-We can try to run with a larger problem size. The computation scales with nBodies^2, whereas the data transfer scales linearly.
+![16 nodes, Vampir](plots/img/5-poorcomms.png)
 
+We can try to run with a larger problem size. The computation scales with nBodies^2, whereas the data transfer scales linearly. This allows more than one node to be of benefit for larger problem sizes, but the scaling is still not very good.
 
-
-
-
-
+![MPI Scaling](plots/img/5-plot.png)
 
 
-
-
-
-
-
+#### Overlapping Computation and Communication
 
 
 
