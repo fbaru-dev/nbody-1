@@ -62,17 +62,25 @@ This scheme seems to have worked well. With 16 threads (no SSE!) we now spend ar
 ![MPI Scaling](plots/img/4-plot.png)
 
 #### More than one node...
-The cluster available for testing has only gigabit ethernet interconnects. As soon as we start splitting ranks across nodes, performance degrades. If we run 16 threads (no SSE!) as above but with 1 thread on each of 16 nodes, communication accounts for some 35% of the runtime:
+The cluster available for testing has only gigabit ethernet interconnects. As soon as we start splitting ranks across nodes, performance degrades. If we run 16 threads (no SSE!) as above but with 1 thread on each of 16 nodes, communication accounts for some 45% of the runtime:
 
 ![16 nodes, Vampir](plots/img/5-poorcomms.png)
 
-We can try to run with a larger problem size. The computation scales with nBodies^2, whereas the data transfer scales linearly. This allows more than one node to be of benefit for larger problem sizes, but the scaling is still not very good.
+We can try to run with a larger problem size. The computation scales with nBodies^2, whereas the data transfer scales linearly. This allows more than one node to be of benefit for larger problem sizes, but the scaling is still not very good:
 
 ![MPI Scaling](plots/img/5-plot.png)
 
+The problem is that we are saturating the gigabit links between nodes after ~32 threads.
 
-#### Overlapping Computation and Communication
+The first thing to realize is that the `UpdatePositions` function takes almost no time at all. It would be far better (since we are using `MPI_Allreduce`, so all ranks know the full acceleration array) if each rank were to update its own position arrays and avoid the broadcast entirely. This dramatically cuts the network usage, and we start to see some reasonable scaling:
 
+![MPI Scaling](plots/img/5-plot-nor.png)
+
+The remaining bottleneck is `MPI_Allreduce`. This cannot usefully be overlapped with any computation, so the only way to make any further gains is to reduce the number of ranks taking part in the reduction.
+
+
+### Hybrid MPI + OpenMP
+This can be achieved with a mixture of MPI and OpenMP. The goal is to run fewer MPI threads per node, with OpenMP threading loops within each rank's section of particles. Whether it is best to run a single MPI thread per node, or to run more needs to be investigated.
 
 
 
