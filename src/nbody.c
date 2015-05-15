@@ -16,11 +16,11 @@
 // Choose precision
 #define DOUBLEPREC 1
 	typedef double real_t;
-	#define VECWIDTH 1
+//	#define VECWIDTH 1
 //	#define AVX 1
 //		#define VECWIDTH 4
-//	#define SSE 1
-//		#define VECWIDTH 2
+	#define SSE 1
+		#define VECWIDTH 2
 
 
 //#define SINGLEPREC 1
@@ -93,10 +93,11 @@ double GetWallTime(void);
 
 int main(void)
 {
-	const int nTimeSteps = 20000;
+	const int nTimeSteps = 2000;
 	//const int nTimeSteps = 100;
 
-	for (int nBodies = 10; nBodies < 100; nBodies += 10) {
+/*
+	for (int nBodies = 10; nBodies < 200; nBodies += 10) {
 		RunSimulation(nTimeSteps, nBodies);
 	}
 	for (int nBodies = 100; nBodies < 300; nBodies += 20) {
@@ -108,6 +109,8 @@ int main(void)
 	for (int nBodies = 1000; nBodies <= 1000; nBodies += 500) {
 		RunSimulation(nTimeSteps, nBodies);
 	}
+*/
+	RunSimulation(nTimeSteps, 4000);
 	printf("Complete!\n");
 	return 0;
 }
@@ -165,7 +168,7 @@ void RunSimulation(const int nTimeSteps, const int nBodies)
 	}
 	timeElapsed = GetWallTime() - timeElapsed;
 //	printf("nBodies: %4d, MegaUpdates/second: %lf. Error: %le\n", nBodies, nTimeSteps*nBodies/timeElapsed/1000000.0, ErrorCheck(nBodies, rx));
-	printf("%4d %le %le\n", nBodies, nTimeSteps/timeElapsed/1000000.0, ErrorCheck(nBodies, rx));
+	printf("%4d Time %lf MTSps %le Sumx %.15le\n", nBodies, timeElapsed, nTimeSteps/timeElapsed/1000000.0, ErrorCheck(nBodies, rx));
 
 
 
@@ -416,12 +419,24 @@ void SetInitialConditions(
 	real_t * restrict ay,
 	real_t * restrict mass)
 {
+/*
 	// Set random initial conditions.
 	for (int i = 0; i < nBodies; i++) {
 		rx[i] = ((double)rand()*(double)100/(double)RAND_MAX)*pow(-1,rand()%2);
 		ry[i] = ((double)rand()*(double)100/(double)RAND_MAX)*pow(-1,rand()%2);
 		vx[i] = (rand()%3)*pow(-1,rand()%2);
 		vy[i] = (rand()%3)*pow(-1,rand()%2);
+		ax[i] = 0;
+		ay[i] = 0;
+		mass[i] = 1000;
+	}
+*/
+	//Some deterministic initial conditions (for testing openmpi build's weird differences)
+	for (int i = 0; i < nBodies; i++) {
+		rx[i] = 500*i*pow(-1,i)*sin(i);
+		ry[i] = -500*i*pow(-1,i)*cos(i);
+		vx[i] = 10*i*i*pow(-1,i);
+		vy[i] = -5*i*i*pow(-1,i);
 		ax[i] = 0;
 		ay[i] = 0;
 		mass[i] = 1000;

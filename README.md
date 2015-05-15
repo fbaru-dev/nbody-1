@@ -82,5 +82,19 @@ The remaining bottleneck is `MPI_Allreduce`. This cannot usefully be overlapped 
 ### Hybrid MPI + OpenMP
 This can be achieved with a mixture of MPI and OpenMP. The goal is to run fewer MPI threads per node, with OpenMP threading loops within each rank's section of particles. Whether it is best to run a single MPI thread per node, or to run more needs to be investigated.
 
+![Hybrid Runtimes](plots/img/6-hybrid-times.png)
+
+Wow! That didn't help at all. What we should bear in mind is that MPI implementations aren't stupid (mostly?) They are aware that some communication is intra-node, and use shared memory accordingly here. By adding OpenMP we have added extra overhead, and not reduced the network load at all.
+
+That said, what we have learnt from this is that if you run a hybrid code, it can be important to account of NUMA effects, and bind threads accordingly.
+
+
+
+
+
+
+
+
+
 
 
